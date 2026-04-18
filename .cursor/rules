@@ -1,0 +1,23 @@
+# Git Commit Message Format
+
+When generating commit messages, always follow this format strictly:
+
+## Format
+<type>(<file>): <what was done>
+
+## Types
+feat / fix / refactor / perf / style / docs / test / chore
+
+## Rules
+- Output in English only
+- Subject line must be under 72 characters
+- Use present tense ("Add", "Fix", "Update", not "Added", "Fixed")
+- No body, no footer, single line only
+- <file> should be the main filename changed (without path or extension)
+- Capitalize the first letter of the subject (after the colon and space)
+
+## Examples
+Fix(image_upscaler): Remove redundant pil_to_cv2 conversion in run_pipeline
+Perf(image_upscaler): Release VRAM cache after GPU inference
+Feat(app): Add session restore logic via URL query param
+Refactor(image_upscaler): Replace random EDSR weights with bicubic interpolation

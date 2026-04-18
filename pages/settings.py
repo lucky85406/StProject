@@ -9,7 +9,7 @@ def show():
     with st.form("profile_form"):
         display_name = st.text_input("顯示名稱", value=st.session_state.username)
         email = st.text_input("電子郵件", placeholder="example@email.com")
-        st.form_submit_button("儲存變更", use_container_width=False)
+        st.form_submit_button("儲存變更", width='stretch')
 
     st.divider()
     st.subheader("🔒 修改密碼")

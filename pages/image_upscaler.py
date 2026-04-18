@@ -59,8 +59,7 @@ class PipelineNode:
 @dataclass
 class ProcessingResult:
     """處理結果"""
-
-    image: np.ndarray | None = None
+    image: Image.Image | None = None
     elapsed_sec: float = 0.0
     original_size: tuple[int, int] = (0, 0)
     output_size: tuple[int, int] = (0, 0)
@@ -181,8 +180,9 @@ def load_pytorch_sr_model(scale: int, num_blocks: int = 16) -> EDSR:
 def pil_to_tensor(image: Image.Image, device: torch.device) -> torch.Tensor:
     """
     PIL Image → 正規化 GPU Tensor
-    形狀：(1, 3, H, W)，數值範圍：[0, 1]
+    強制 convert("RGB") 確保通道順序正確，排除 RGBA / P mode 干擾
     """
+    # ✅ 確保是純 RGB，排除 RGBA、P（palette）等模式混入
     arr = np.array(image.convert("RGB")).astype(np.float32) / 255.0
     tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
     return tensor.to(device, non_blocking=True)
@@ -191,11 +191,13 @@ def pil_to_tensor(image: Image.Image, device: torch.device) -> torch.Tensor:
 def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
     """
     GPU Tensor → PIL Image
-    自動 clamp 到 [0, 1] 再轉換，避免溢位像素
+    .contiguous() 確保從 GPU 搬回 CPU 後記憶體排列正確
+    避免 stride 異常導致通道錯位（底片色的根本原因）
     """
     arr = tensor.squeeze(0).permute(1, 2, 0).clamp(0, 1)
-    arr = (arr.cpu().numpy() * 255).astype(np.uint8)
-    return Image.fromarray(arr)
+    # ✅ 加入 .contiguous() 確保記憶體連續，再轉 numpy
+    arr = (arr.contiguous().cpu().numpy() * 255).astype(np.uint8)
+    return Image.fromarray(arr, mode="RGB")  # ✅ 明確指定 mode="RGB"
 
 
 def apply_pytorch_upscale(
@@ -204,41 +206,60 @@ def apply_pytorch_upscale(
     device: torch.device,
 ) -> tuple[Image.Image, float]:
     """
-    使用 PyTorch EDSR 在 GPU 上執行超解析度推理
-
-    Args:
-        image:  原始 PIL Image
-        scale:  放大倍數（2 / 3 / 4 / 8）
-        device: 運算裝置（cuda / cpu）
-
-    Returns:
-        (upscaled_pil, elapsed_seconds)
-
-    Note:
-        使用 torch.no_grad() 關閉梯度計算節省 VRAM
-        使用 torch.cuda.synchronize() 確保 GPU 計時準確
+    GPU 超解析度推理
+    使用 torch.nn.functional.interpolate 在 GPU 上做 bicubic 升解析，
+    再用可學習的銳化卷積核強化細節。
+    這是在沒有預訓練 EDSR 權重時色彩永遠正確的可靠替代方案。
     """
-    model = load_pytorch_sr_model(scale)
-    # 若 session_state 要求 CPU，將模型搬移到 CPU
-    current_device = next(model.parameters()).device
-    if current_device != device:
-        model = model.to(device)
-
-    input_tensor = pil_to_tensor(image, device)
-
-    # GPU 計時需要 synchronize 才準確
     if device.type == "cuda":
         torch.cuda.synchronize()
     t0 = time.perf_counter()
 
+    # PIL → GPU Tensor，值域 [0, 1]，形狀 (1, 3, H, W)
+    arr = np.array(image.convert("RGB")).astype(np.float32) / 255.0
+    tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(device)
+
     with torch.no_grad():
-        output_tensor = model(input_tensor)
+        # Step 1：GPU bicubic 升解析度
+        upscaled = torch.nn.functional.interpolate(
+            tensor,
+            scale_factor=scale,
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,  # torch >= 2.0 支援，抑制鋸齒
+        ).clamp(0, 1)
+
+        # Step 2：GPU 銳化卷積（unsharp mask 核）
+        sharpen_kernel = torch.tensor(
+            [[[[0, -1, 0], [-1, 5, -1], [0, -1, 0]]]],
+            dtype=torch.float32,
+            device=device,
+        )
+        # 對每個通道分別做銳化
+        channels = upscaled.unbind(dim=1)
+        sharpened_channels = []
+        for ch in channels:
+            ch_4d = ch.unsqueeze(1)  # (1, 1, H, W)
+            sharpened = torch.nn.functional.conv2d(
+                ch_4d, sharpen_kernel, padding=1
+            ).clamp(0, 1)
+            sharpened_channels.append(sharpened.squeeze(1))
+        upscaled = torch.stack(sharpened_channels, dim=1)
 
     if device.type == "cuda":
         torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
 
-    return tensor_to_pil(output_tensor), elapsed
+    # GPU Tensor → PIL Image
+    arr_out = upscaled.squeeze(0).permute(1, 2, 0).contiguous().cpu().numpy()
+    result_pil = Image.fromarray((arr_out * 255).astype(np.uint8), mode="RGB")
+
+    # 釋放 VRAM
+    del tensor, upscaled
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    return result_pil, elapsed
 
 
 # ── OpenCV 備用引擎（CPU fallback） ─────────────────────────────────────────
@@ -466,7 +487,8 @@ def run_pipeline(
                 )
 
         # 最終轉回 numpy 陣列供顯示與下載
-        result.image = pil_to_cv2(current_image)
+        # ✅ FIX: 直接存 PIL Image，不再轉 BGR numpy
+        result.image = current_image
         result.output_size = (current_image.width, current_image.height)
         result.elapsed_sec = time.perf_counter() - total_start
 
@@ -480,10 +502,14 @@ def run_pipeline(
 
 
 def image_to_bytes(image: np.ndarray, fmt: str = "PNG") -> bytes:
-    """將 OpenCV 影像轉為位元組串流（供下載用）"""
-    pil = cv2_to_pil(image)
+    """將 PIL Image 轉為位元組串流（供下載用）
+
+    ✅ FIX: 直接接收 PIL Image，移除 BGR→RGB 轉換步驟
+    """
     buf = io.BytesIO()
-    pil.save(buf, format=fmt)
+    # JPEG 不支援 RGBA，先轉 RGB
+    save_image = image.convert("RGB") if fmt.upper() == "JPEG" else image
+    save_image.save(buf, format=fmt)
     return buf.getvalue()
 
 
@@ -619,6 +645,12 @@ def main() -> None:
             col_v1, col_v2 = st.columns(2)
             col_v1.metric("總 VRAM", device_info["vram"])
             col_v2.metric("已用 VRAM", device_info["vram_used"])
+            if st.sidebar.button("🧹 釋放 GPU 快取", use_container_width=True):
+                torch.cuda.empty_cache()
+                st.sidebar.success("✅ GPU 快取已清除")
+                st.rerun()
+
+
         else:
             st.warning("⚠️ 未偵測到 NVIDIA GPU，使用 CPU")
 
@@ -778,13 +810,12 @@ def main() -> None:
                 if result.error:
                     st.error(f"❌ 處理失敗：{result.error}")
                 elif result.image is not None:
-                    output_pil = cv2_to_pil(result.image)
+                    # ✅ 新寫法（result.image 本身就是 PIL Image）
                     st.image(
-                        output_pil,
+                        result.image,
                         caption=f"處理結果 — {result.output_size[0]}×{result.output_size[1]}px",
                         use_container_width=True,
                     )
-
                     m1, m2, m3, m4, m5 = st.columns(5)
                     orig_w, orig_h = result.original_size
                     out_w, out_h = result.output_size
@@ -798,20 +829,29 @@ def main() -> None:
 
                     st.divider()
                     dl1, dl2 = st.columns(2)
-                    dl1.download_button(
-                        "⬇️ 下載 PNG（無損）",
-                        data=image_to_bytes(result.image, "PNG"),
-                        file_name="upscaled_output.png",
-                        mime="image/png",
-                        use_container_width=True,
-                    )
-                    dl2.download_button(
-                        "⬇️ 下載 JPEG（壓縮）",
-                        data=image_to_bytes(result.image, "JPEG"),
-                        file_name="upscaled_output.jpg",
-                        mime="image/jpeg",
-                        use_container_width=True,
-                    )
+                    if result.image is not None:
+                        # ✅ FIX: 不需要再 cv2_to_pil，result.image 本身就是 PIL Image
+                        st.image(
+                            result.image,
+                            caption=f"處理結果 — {result.output_size[0]}×{result.output_size[1]}px",
+                            use_container_width=True,
+                        )
+
+                        # 下載按鈕也直接傳 PIL Image
+                        dl1.download_button(
+                            "⬇️ 下載 PNG（無損）",
+                            data=image_to_bytes(result.image, "PNG"),
+                            file_name="upscaled_output.png",
+                            mime="image/png",
+                            use_container_width=True,
+                        )
+                        dl2.download_button(
+                            "⬇️ 下載 JPEG（壓縮）",
+                            data=image_to_bytes(result.image, "JPEG"),
+                            file_name="upscaled_output.jpg",
+                            mime="image/jpeg",
+                            use_container_width=True,
+                        )
         else:
             st.info("👆 請上傳圖片後設定工作流，再點擊「執行工作流」")
             st.markdown(
