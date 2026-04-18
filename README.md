@@ -32,17 +32,6 @@ uv sync
 uv run streamlit run app.py
 ```
 
-### 3. 開啟瀏覽器
-
-前往 http://localhost:8501
-
-## 測試帳號
-
-| 帳號    | 密碼       |
-|---------|-----------|
-| admin   | admin123  |
-| user    | user123   |
-
 ## 功能說明
 
 - **登入畫面**：帳號密碼驗證，登入失敗顯示錯誤提示
