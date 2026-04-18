@@ -1,2 +1,9 @@
 .env
 .session_store.json
+# AI 模型權重（檔案過大，不納入版本控制）
+models/
+*.pb
+*.pth
+*.pt
+*.onnx
+*.weights
