@@ -1,4 +1,7 @@
+# 環境變數與機密設定
 .env
+.env.*
+!.env.example
 .session_store.json
 # AI 模型權重（檔案過大，不納入版本控制）
 models/
