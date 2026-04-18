@@ -1,6 +1,8 @@
+# app.py
 import streamlit as st
+from core.auth import get_cookie_manager, make_token, verify_token
+from core.users import verify_password
 
-# ── 頁面設定 ──────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="StProject",
     page_icon="🏠",
@@ -8,17 +10,19 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── 假設使用者資料（可換成資料庫） ────────────────────────────────────────────
-USERS = {
-    "admin": "admin123",
-    "user": "user123",
-}
+cookies = get_cookie_manager()
+if not cookies.ready():
+    st.stop()
 
-# ── Session 初始化 ─────────────────────────────────────────────────────────────
 if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "username" not in st.session_state:
-    st.session_state.username = ""
+    saved_user = cookies.get("username", "")
+    saved_token = cookies.get("token", "")
+    if saved_user and saved_token and verify_token(saved_user, saved_token):
+        st.session_state.logged_in = True
+        st.session_state.username = saved_user
+    else:
+        st.session_state.logged_in = False
+        st.session_state.username = ""
 
 
 # ── 登入畫面 ───────────────────────────────────────────────────────────────────
@@ -59,7 +63,8 @@ def show_login():
             submit = st.form_submit_button("登入", use_container_width=True)
 
         if submit:
-            if username in USERS and USERS[username] == password:
+            # ✅ 新寫法（透過 core.users 的函式）
+            if verify_password(username, password):
                 st.session_state.logged_in = True
                 st.session_state.username = username
                 st.success("登入成功！")
