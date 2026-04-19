@@ -23,7 +23,7 @@ def show() -> None:
             border-radius:12px;padding:1.2rem 1.6rem;margin-bottom:1.5rem;
         ">
             <span style="font-size:1.5rem">👋</span>
-            <span style="font-size:1.1rem;font-weight:700;color:#e8eaf0;margin-left:10px">
+            <span style="font-size:1.1rem;font-weight:700;color:#A6A7AB;margin-left:10px">
                 歡迎回來，<span style="color:#6c8eff">{username}</span>！
             </span>
             <p style="font-size:0.82rem;color:#8890a4;margin:6px 0 0">
