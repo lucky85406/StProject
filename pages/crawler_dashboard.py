@@ -5,13 +5,18 @@
 限制：僅供內部分析，不進行商業使用及二次上傳
 """
 
+from __future__ import annotations
+
 import asyncio
+import json
 import re
+import subprocess
+import sys
 import time
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Optional, Callable
 from urllib.parse import urlparse, urljoin
 from urllib.robotparser import RobotFileParser
 
@@ -275,9 +280,6 @@ def fetch_with_browser_sync(
     透過獨立子程序執行 Playwright，完全迴避 Windows event loop 衝突。
     回傳 (html, final_url)。
     """
-    import sys
-    import json
-    import subprocess
     from pathlib import Path
 
     # 找到 playwright_runner.py 的絕對路徑
@@ -299,7 +301,7 @@ def fetch_with_browser_sync(
 
     result = subprocess.run(
         [sys.executable, str(runner_path)],
-        input=payload.encode("utf-8"),   # ← 輸入也用 utf-8
+        input=payload.encode("utf-8"),
         capture_output=True,
         timeout=timeout_ms / 1000 + 10,
     )
@@ -307,13 +309,14 @@ def fetch_with_browser_sync(
         raise RuntimeError(
             f"playwright_runner 執行失敗：\n{result.stderr.decode('utf-8', errors='replace')}"
         )
-        
-    output = json.loads(result.stdout.decode("utf-8"))  # ← 手動 decode
+
+    output = json.loads(result.stdout.decode("utf-8"))
 
     if output.get("error"):
         raise RuntimeError(f"Playwright 錯誤：{output['error']}")
 
     return output["html"], output["final_url"]
+
 
 # ════════════════════════════════════════════════════════
 #  爬蟲核心
@@ -341,6 +344,7 @@ async def fetch_one(
     """爬取單一 URL"""
     start = time.monotonic()
     content_type, platform = detect_platform(url)
+    last_error = ""
 
     for attempt in range(config.max_retries):
         try:
@@ -375,7 +379,7 @@ async def fetch_one(
     return CollectedItem(
         url=url,
         source_platform=platform,
-        error=f"失敗（重試 {config.max_retries} 次）",
+        error=f"失敗（重試 {config.max_retries} 次）：{last_error}",
         fetch_time_ms=int((time.monotonic() - start) * 1000),
     )
 
@@ -404,7 +408,7 @@ async def run_crawl_async(
         follow_redirects=True,
     ) as client:
         tasks = [fetch_one(client, url, config, semaphore) for url in urls]
-        for i, coro in enumerate(asyncio.as_completed(tasks)):
+        for coro in asyncio.as_completed(tasks):
             item = await coro
             results.append(item)
             await asyncio.sleep(config.request_delay)
@@ -434,7 +438,7 @@ class TagExtractResult:
     selector: str
     attribute: str
     matched_count: int
-    contents: list[str]  # 每個節點的文字內容
+    contents: list[str]       # 每個節點的文字內容
     html_snippets: list[str]  # 每個節點的 outer HTML（供預覽）
     error: Optional[str] = None
 
@@ -454,15 +458,16 @@ def extract_tags_from_tree(
     queries: list[tuple[str, str]],
     max_nodes_per_selector: int = 20,
     text_max_len: int = 500,
-    base_url: str = "",  # ← 新增：用來補全相對路徑
+    base_url: str = "",
 ) -> list[TagExtractResult]:
     """
     從已解析的 HTMLParser 中，依序擷取每個 CSS selector 對應的內容。
 
     Args:
-        queries: [(selector, attribute), ...]
-                 attribute 為空字串時取節點文字內容
-                 attribute 為 "href"/"src" 等時取對應屬性值
+        queries:    [(selector, attribute), ...]
+                    attribute 為空字串時取節點文字內容
+                    attribute 為 "href"/"src" 等時取對應屬性值
+        base_url:   用來補全相對路徑
 
     Returns:
         每個 selector 對應的 TagExtractResult 列表
@@ -537,7 +542,6 @@ async def fetch_and_extract_tags(
     爬取單一 URL 並依照自訂 selector 擷取內容。
     複用 CrawlerConfig 的 headers / timeout / retry 設定。
     """
-
     start = time.monotonic()
 
     # 安全驗證
@@ -597,13 +601,12 @@ async def fetch_and_extract_tags(
 
 def run_tag_extract(
     url: str,
-    queries: list[tuple[str, str]],  # ← 從 list[str] 改成 list[tuple[str, str]]
+    queries: list[tuple[str, str]],
     config: CrawlerConfig,
     max_nodes: int = 20,
     use_browser: bool = False,
     scroll_to_bottom: bool = False,
 ) -> CustomTagCrawlResult:
-
     """Streamlit 同步包裝器"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -623,6 +626,268 @@ def run_tag_extract(
 
 
 # ════════════════════════════════════════════════════════
+#  二階段爬蟲工作流 (Two-Stage Pipeline)
+#  Stage 1：從列表頁擷取 href 連結
+#  Stage 2：逐一深度爬取各詳情頁內容
+# ════════════════════════════════════════════════════════
+
+
+@dataclass
+class StageConfig:
+    """
+    單一爬蟲階段的設定。
+    每個 Stage 可獨立設定 selector、目標屬性與解析策略。
+    """
+    selectors: list[tuple[str, str]]   # [(selector, attribute), ...]
+    label: str = "Stage"
+    use_browser: bool = False
+    scroll_to_bottom: bool = False
+    max_nodes: int = 20
+
+
+@dataclass
+class PipelineStageResult:
+    """單一 Stage 對單一 URL 的執行結果。"""
+    source_url: str
+    stage_label: str
+    tag_results: list[TagExtractResult]
+    fetch_time_ms: int = 0
+    error: Optional[str] = None
+
+
+@dataclass
+class TwoStagePipelineResult:
+    """
+    完整兩階段工作流的結果。
+    包含 Stage 1 的來源頁、抽出的連結、以及各詳情頁的 Stage 2 結果。
+    """
+    source_url: str
+    extracted_links: list[str] = field(default_factory=list)
+    stage2_results: list[PipelineStageResult] = field(default_factory=list)
+    total_fetch_time_ms: int = 0
+    error: Optional[str] = None
+
+
+async def _run_pipeline_stage(
+    url: str,
+    stage_cfg: StageConfig,
+    crawler_cfg: CrawlerConfig,
+) -> PipelineStageResult:
+    """執行單一階段的爬取與解析，內部複用 fetch_and_extract_tags。"""
+    result = await fetch_and_extract_tags(
+        url=url,
+        queries=stage_cfg.selectors,
+        config=crawler_cfg,
+        max_nodes=stage_cfg.max_nodes,
+        use_browser=stage_cfg.use_browser,
+        scroll_to_bottom=stage_cfg.scroll_to_bottom,
+    )
+    return PipelineStageResult(
+        source_url=url,
+        stage_label=stage_cfg.label,
+        tag_results=result.tag_results,
+        fetch_time_ms=result.fetch_time_ms,
+        error=result.error,
+    )
+
+
+def _extract_links_from_stage_result(
+    result: PipelineStageResult,
+    base_url: str,
+    same_domain_only: bool = True,
+    max_links: int = 50,
+) -> list[str]:
+    """
+    從 Stage 1 結果中提取有效 href 連結。
+
+    Args:
+        result:           Stage 1 的 PipelineStageResult
+        base_url:         列表頁的原始 URL（用於相對路徑補全）
+        same_domain_only: 是否限制只爬同網域的連結（防止越域爬取）
+        max_links:        最多提取幾條連結
+
+    Returns:
+        清理後的絕對 URL 列表
+    """
+    base_domain = urlparse(base_url).netloc
+    links: list[str] = []
+    seen: set[str] = set()
+
+    for tag_result in result.tag_results:
+        for raw_link in tag_result.contents:
+            # 補全相對路徑
+            full_url = urljoin(base_url, raw_link.strip())
+
+            # 基本過濾
+            parsed = urlparse(full_url)
+            if parsed.scheme not in ("http", "https"):
+                continue
+            if same_domain_only and parsed.netloc != base_domain:
+                continue
+            if full_url in seen:
+                continue
+
+            seen.add(full_url)
+            links.append(full_url)
+
+            if len(links) >= max_links:
+                break
+
+        if len(links) >= max_links:
+            break
+
+    return links
+
+
+async def run_two_stage_pipeline(
+    source_url: str,
+    stage1_cfg: StageConfig,
+    stage2_cfg: StageConfig,
+    crawler_cfg: CrawlerConfig,
+    same_domain_only: bool = True,
+    max_detail_pages: int = 20,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> TwoStagePipelineResult:
+    """
+    執行完整的兩階段爬蟲工作流。
+
+    Stage 1：爬取列表頁，依 stage1_cfg.selectors 擷取所有目標 href
+    Stage 2：對每個 href 執行深度爬取，依 stage2_cfg.selectors 解析詳情
+
+    Args:
+        source_url:        列表頁 URL（Stage 1 入口）
+        stage1_cfg:        Stage 1 設定（selector 應指向 href 連結）
+        stage2_cfg:        Stage 2 設定（selector 指向詳情頁的目標欄位）
+        crawler_cfg:       共用爬蟲設定（速率、robots.txt 等）
+        same_domain_only:  Stage 2 只爬取同網域連結（合規保護）
+        max_detail_pages:  Stage 2 最多爬幾個詳情頁（防止無限爬取）
+        progress_callback: 進度回呼 fn(current, total, current_url)
+    """
+    total_start = time.monotonic()
+
+    # ── robots.txt 檢查（Stage 1 入口頁）──
+    if crawler_cfg.respect_robots and not check_robots_allowed(source_url):
+        return TwoStagePipelineResult(
+            source_url=source_url,
+            error=f"robots.txt 封鎖：{source_url}",
+        )
+
+    # ── Stage 1：爬取列表頁 ──
+    stage1_result = await _run_pipeline_stage(source_url, stage1_cfg, crawler_cfg)
+
+    if stage1_result.error:
+        return TwoStagePipelineResult(
+            source_url=source_url,
+            error=f"Stage 1 失敗：{stage1_result.error}",
+        )
+
+    # ── 提取 href 連結 ──
+    extracted_links = _extract_links_from_stage_result(
+        result=stage1_result,
+        base_url=source_url,
+        same_domain_only=same_domain_only,
+        max_links=max_detail_pages,
+    )
+
+    if not extracted_links:
+        return TwoStagePipelineResult(
+            source_url=source_url,
+            extracted_links=[],
+            error="Stage 1 未擷取到任何有效連結，請確認 Selector 是否正確",
+        )
+
+    # ── robots.txt 過濾（Stage 2 各詳情頁）──
+    if crawler_cfg.respect_robots:
+        filtered = [u for u in extracted_links if check_robots_allowed(u)]
+        extracted_links = filtered
+
+    if not extracted_links:
+        return TwoStagePipelineResult(
+            source_url=source_url,
+            extracted_links=[],
+            error="所有詳情頁連結皆被 robots.txt 封鎖",
+        )
+
+    # ── Stage 2：逐一爬取詳情頁（含速率控制）──
+    semaphore = asyncio.Semaphore(crawler_cfg.max_concurrency)
+
+    async def _fetch_detail(url: str, idx: int) -> PipelineStageResult:
+        async with semaphore:
+            if progress_callback:
+                progress_callback(idx, len(extracted_links), url)
+            result = await _run_pipeline_stage(url, stage2_cfg, crawler_cfg)
+            # ⚠️ 尊重目標網站，每次請求後等待
+            await asyncio.sleep(crawler_cfg.request_delay)
+            return result
+
+    tasks = [
+        _fetch_detail(url, i) for i, url in enumerate(extracted_links, start=1)
+    ]
+    stage2_results: list[PipelineStageResult] = await asyncio.gather(
+        *tasks, return_exceptions=False
+    )
+
+    total_ms = int((time.monotonic() - total_start) * 1000)
+
+    return TwoStagePipelineResult(
+        source_url=source_url,
+        extracted_links=extracted_links,
+        stage2_results=list(stage2_results),
+        total_fetch_time_ms=total_ms,
+    )
+
+
+def run_two_stage_pipeline_sync(
+    source_url: str,
+    stage1_cfg: StageConfig,
+    stage2_cfg: StageConfig,
+    crawler_cfg: CrawlerConfig,
+    same_domain_only: bool = True,
+    max_detail_pages: int = 20,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> TwoStagePipelineResult:
+    """Streamlit 同步包裝器，供 UI 層直接呼叫。"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(
+            run_two_stage_pipeline(
+                source_url=source_url,
+                stage1_cfg=stage1_cfg,
+                stage2_cfg=stage2_cfg,
+                crawler_cfg=crawler_cfg,
+                same_domain_only=same_domain_only,
+                max_detail_pages=max_detail_pages,
+                progress_callback=progress_callback,
+            )
+        )
+    finally:
+        loop.close()
+
+
+def _pipeline_results_to_dataframe(
+    pipeline_result: TwoStagePipelineResult,
+) -> pd.DataFrame:
+    """將 Pipeline 結果轉換為 DataFrame，方便匯出。"""
+    rows = []
+    for page_result in pipeline_result.stage2_results:
+        # 將所有 selector 的結果攤平成 dict
+        row: dict = {
+            "來源列表頁": pipeline_result.source_url,
+            "詳情頁 URL": page_result.source_url,
+            "耗時(ms)": page_result.fetch_time_ms,
+            "狀態": f"失敗: {page_result.error}" if page_result.error else "成功",
+        }
+        for tag_res in page_result.tag_results:
+            col_name = f"{tag_res.selector}"
+            if tag_res.attribute and tag_res.attribute != "（文字內容）":
+                col_name += f"[{tag_res.attribute}]"
+            row[col_name] = " | ".join(tag_res.contents[:5])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ════════════════════════════════════════════════════════
 #  Streamlit UI
 # ════════════════════════════════════════════════════════
 
@@ -634,33 +899,22 @@ def _inject_styles() -> None:
     @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
 
     :root {
-        /* ── 柔和漸層色系 ── */
         --bg:        #f0f4ff;
         --bg-end:    #faf5ff;
         --surface:   rgba(255,255,255,0.72);
         --surface2:  rgba(255,255,255,0.50);
         --border:    rgba(148,130,210,0.18);
         --border2:   rgba(168,148,228,0.28);
-
-        /* 主色：薰衣草紫 → 玫瑰粉 漸層 */
         --accent:    #8b5cf6;
         --accent2:   #ec4899;
         --accent-soft: rgba(139,92,246,0.12);
-
-        /* 功能色 */
         --success:   #059669;
         --warn:      #d97706;
         --danger:    #dc2626;
-
-        /* 文字 */
         --text:      #1e1b4b;
         --text2:     #4c1d95;
         --muted:     #7c6fa0;
-
-        /* 尺寸 */
         --radius:    14px;
-
-        /* 漸層捷徑 */
         --grad-main:  linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
         --grad-soft:  linear-gradient(135deg, rgba(139,92,246,0.15) 0%, rgba(236,72,153,0.10) 100%);
         --grad-bg:    linear-gradient(160deg, #f0f4ff 0%, #faf0ff 50%, #fff5f8 100%);
@@ -671,93 +925,74 @@ def _inject_styles() -> None:
         background: var(--grad-bg) !important;
         background-attachment: fixed !important;
         color: var(--text) !important;
-        font-family: 'Syne', sans-serif;
+        font-family: 'Syne', sans-serif !important;
     }
 
-    /* 主內容區帶微妙紋理 */
-    [data-testid="stAppViewContainer"] > section {
-        background: transparent !important;
-    }
-    [data-testid="stMain"] {
-        background: transparent !important;
-    }
-
-    /* 隱藏 Streamlit 預設元素 */
-    #MainMenu, footer { visibility: hidden; }
-    /* header 保留顯示，確保頂部 Rerun 按鈕與設定齒輪可正常使用 */
     [data-testid="stSidebar"] {
         background: var(--grad-sidebar) !important;
         border-right: 1px solid var(--border2) !important;
-        box-shadow: 2px 0 20px rgba(139,92,246,0.06) !important;
     }
-    [data-testid="stSidebar"] > div {
-        background: transparent !important;
+    [data-testid="stSidebar"] * { color: var(--text) !important; }
+    [data-testid="stSidebar"] [data-baseweb="select"] {
+        background: rgba(255,255,255,0.80) !important;
+        border-color: var(--border2) !important;
+        border-radius: 8px !important;
     }
+    [data-testid="stSidebar"] [data-baseweb="select"] * {
+        background: rgba(255,255,255,0.90) !important;
+        color: var(--text) !important;
+        font-family: 'DM Mono', monospace !important;
+        font-size: 0.78rem !important;
+    }
+    [data-testid="stSidebar"] hr {
+        border-color: var(--border) !important;
+        margin: 0.8rem 0 !important;
+    }
+    [data-testid="stSidebarNav"] { display: none; }
 
-    /* 頁面標題區 */
+    /* Hero Header */
     .hero-header {
-        background: linear-gradient(135deg,
-            rgba(139,92,246,0.10) 0%,
-            rgba(236,72,153,0.07) 50%,
-            rgba(255,255,255,0.80) 100%);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
+        background: linear-gradient(135deg, #f5f0ff 0%, #fce7f3 100%);
         border: 1px solid var(--border2);
         border-radius: var(--radius);
         padding: 2rem 2.5rem;
         margin-bottom: 1.5rem;
         position: relative;
         overflow: hidden;
-        box-shadow: 0 4px 24px rgba(139,92,246,0.08);
     }
     .hero-header::before {
         content: '';
         position: absolute;
-        top: -70px; right: -50px;
-        width: 240px; height: 240px;
-        background: radial-gradient(circle,
-            rgba(139,92,246,0.18) 0%, transparent 68%);
-        border-radius: 50%;
-    }
-    .hero-header::after {
-        content: '';
-        position: absolute;
-        bottom: -50px; left: 25%;
+        top: -60px; right: -60px;
         width: 200px; height: 200px;
-        background: radial-gradient(circle,
-            rgba(236,72,153,0.14) 0%, transparent 68%);
+        background: radial-gradient(circle, rgba(139,92,246,0.12) 0%, transparent 70%);
         border-radius: 50%;
     }
     .hero-title {
         font-size: 2rem;
         font-weight: 800;
-        letter-spacing: -0.03em;
         background: var(--grad-main);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        margin: 0 0 0.4rem 0;
+        margin: 0 0 0.3rem;
     }
     .hero-sub {
-        color: var(--muted);
         font-size: 0.875rem;
-        font-family: 'DM Mono', monospace;
-        margin: 0;
+        color: var(--muted);
+        margin: 0 0 0.8rem;
     }
     .compliance-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        background: linear-gradient(90deg, rgba(5,150,105,0.10), rgba(139,92,246,0.08));
+        display: inline-block;
+        background: rgba(5,150,105,0.1);
         border: 1px solid rgba(5,150,105,0.25);
-        color: #059669;
-        padding: 4px 14px;
+        color: var(--success);
+        padding: 4px 12px;
         border-radius: 20px;
-        font-size: 0.75rem;
+        font-size: 0.7rem;
         font-family: 'DM Mono', monospace;
-        margin-top: 0.75rem;
     }
 
-    /* 統計卡片 */
+    /* Stat Grid */
     .stat-grid {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
@@ -805,17 +1040,7 @@ def _inject_styles() -> None:
         color: var(--muted);
     }
 
-    /* 面板容器 */
-    .panel {
-        background: rgba(255,255,255,0.75);
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-        border: 1px solid var(--border2);
-        border-radius: var(--radius);
-        padding: 1.5rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 16px rgba(139,92,246,0.05);
-    }
+    /* Panel */
     .panel-title {
         font-size: 0.7rem;
         font-family: 'DM Mono', monospace;
@@ -838,7 +1063,7 @@ def _inject_styles() -> None:
         flex-shrink: 0;
     }
 
-    /* 結果表格 */
+    /* Result Row */
     .result-row {
         display: grid;
         grid-template-columns: 50px 1fr 140px 160px auto;
@@ -915,22 +1140,7 @@ def _inject_styles() -> None:
     .status-ok  { color: var(--success); }
     .status-err { color: var(--danger); }
 
-    /* 進度條 */
-    .progress-bar-wrap {
-        background: var(--border);
-        border-radius: 4px;
-        height: 6px;
-        margin-top: 6px;
-        overflow: hidden;
-    }
-    .progress-bar-fill {
-        height: 100%;
-        border-radius: 4px;
-        background: linear-gradient(90deg, var(--accent), var(--accent2));
-        transition: width 0.3s ease;
-    }
-
-    /* Streamlit 元件覆寫 */
+    /* Streamlit overrides */
     .stTextArea textarea, .stTextInput input {
         background: rgba(255,255,255,0.85) !important;
         border: 1px solid var(--border2) !important;
@@ -944,8 +1154,6 @@ def _inject_styles() -> None:
         border-color: var(--accent) !important;
         box-shadow: 0 0 0 3px rgba(139,92,246,0.12) !important;
     }
-    .stSlider [data-baseweb="slider"] { padding: 0 !important; }
-    /* 主要按鈕：紫→粉 漸層 */
     .stButton > button {
         background: var(--grad-main) !important;
         color: #ffffff !important;
@@ -964,7 +1172,6 @@ def _inject_styles() -> None:
         transform: translateY(-2px) !important;
         box-shadow: 0 6px 20px rgba(139,92,246,0.35) !important;
     }
-    /* 下載按鈕：柔和紫邊框 */
     .stDownloadButton > button {
         background: rgba(139,92,246,0.08) !important;
         color: var(--accent) !important;
@@ -987,7 +1194,7 @@ def _inject_styles() -> None:
     .stCheckbox label, .stRadio label { color: var(--text) !important; }
     label[data-testid="stWidgetLabel"] { color: var(--muted) !important; font-size: 0.78rem !important; }
 
-    /* ── Sidebar 分區標題 ── */
+    /* Sidebar sections */
     .sb-section {
         margin: 1.2rem 0 0.6rem;
         padding-bottom: 0.4rem;
@@ -1013,145 +1220,88 @@ def _inject_styles() -> None:
         border-radius: 50%;
         flex-shrink: 0;
     }
-
-    /* ── Sidebar 資訊卡片 ── */
-    .sb-info-card {
-        background: rgba(255,255,255,0.60);
-        border: 1px solid var(--border2);
+    .sb-compliance {
+        background: rgba(5,150,105,0.06);
+        border: 1px solid rgba(5,150,105,0.2);
         border-radius: 8px;
         padding: 10px 12px;
-        margin-bottom: 8px;
+        margin-top: 0.8rem;
     }
-    .sb-info-label {
-        font-size: 0.62rem;
+    .sb-compliance-title {
+        font-size: 0.65rem;
         font-family: 'DM Mono', monospace;
-        color: var(--muted);
-        margin-bottom: 3px;
+        color: var(--success);
+        margin-bottom: 6px;
+        font-weight: 600;
     }
-    .sb-info-value {
-        font-size: 1.1rem;
-        font-weight: 700;
-        font-family: 'Syne', sans-serif;
+    .sb-compliance-item {
+        font-size: 0.72rem;
+        color: #065f46;
+        line-height: 1.6;
     }
-
-    /* ── Sidebar 快速篩選按鈕 ── */
     .sb-filter-grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 6px;
-        margin-top: 6px;
+        margin-bottom: 0.6rem;
     }
     .sb-filter-btn {
-        background: rgba(255,255,255,0.65);
-        border: 1px solid var(--border2);
-        border-radius: 6px;
-        padding: 6px 8px;
-        font-size: 0.72rem;
-        font-family: 'DM Mono', monospace;
-        color: var(--muted);
-        cursor: pointer;
-        text-align: center;
-        transition: border-color 0.15s, color 0.15s, background 0.15s;
-    }
-    .sb-filter-btn:hover  { border-color: var(--accent); color: var(--accent);
-                            background: rgba(139,92,246,0.08); }
-    .sb-filter-btn.active { border-color: var(--accent); color: var(--accent);
-                            background: rgba(139,92,246,0.10); }
-
-    /* ── Sidebar 歷史記錄項目 ── */
-    .sb-history-item {
         background: rgba(255,255,255,0.60);
         border: 1px solid var(--border2);
         border-radius: 6px;
-        padding: 8px 10px;
-        margin-bottom: 5px;
-        cursor: pointer;
-        transition: border-color 0.2s, box-shadow 0.2s;
-    }
-    .sb-history-item:hover {
-        border-color: var(--accent);
-        box-shadow: 0 2px 10px rgba(139,92,246,0.10);
-    }
-    .sb-history-time {
-        font-size: 0.6rem;
+        padding: 5px 8px;
+        font-size: 0.68rem;
         font-family: 'DM Mono', monospace;
         color: var(--muted);
-        margin-bottom: 2px;
+        text-align: center;
+    }
+    .sb-history-item {
+        background: rgba(255,255,255,0.50);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        margin-bottom: 6px;
+    }
+    .sb-history-time {
+        font-size: 0.62rem;
+        font-family: 'DM Mono', monospace;
+        color: var(--muted);
     }
     .sb-history-meta {
         font-size: 0.72rem;
         color: var(--text);
     }
 
-    /* ── Sidebar compliance 區塊 ── */
-    .sb-compliance {
-        background: linear-gradient(135deg,
-            rgba(5,150,105,0.07) 0%,
-            rgba(139,92,246,0.06) 100%);
-        border: 1px solid rgba(5,150,105,0.20);
-        border-radius: 8px;
-        padding: 10px 12px;
-        margin-top: 8px;
-    }
-    .sb-compliance-title {
-        font-size: 0.62rem;
-        font-family: 'DM Mono', monospace;
-        color: var(--success);
-        margin-bottom: 6px;
+    /* Pipeline specific */
+    .pipeline-stage-header {
         display: flex;
         align-items: center;
-        gap: 5px;
+        gap: 8px;
+        padding: 10px 14px;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        font-size: 0.8rem;
+        font-weight: 700;
     }
-    .sb-compliance-item {
-        font-size: 0.68rem;
-        color: var(--muted);
-        line-height: 1.8;
+    .stage1-header {
+        background: rgba(59,130,246,0.08);
+        border: 1px solid rgba(59,130,246,0.2);
+        color: #1d4ed8;
+    }
+    .stage2-header {
+        background: rgba(16,185,129,0.08);
+        border: 1px solid rgba(16,185,129,0.2);
+        color: #065f46;
+    }
+    .pipeline-link-item {
+        font-size: 0.72rem;
         font-family: 'DM Mono', monospace;
-    }
-
-    /* ── Sidebar slider 數值顯示優化 ── */
-    [data-testid="stSidebar"] .stSlider {
-        padding-bottom: 0.2rem;
-    }
-    [data-testid="stSidebar"] label {
-        font-size: 0.72rem !important;
-        color: var(--muted) !important;
-        font-family: 'DM Mono', monospace !important;
-    }
-    [data-testid="stSidebar"] .stCheckbox label {
-        font-size: 0.78rem !important;
-        color: var(--text) !important;
-        font-family: 'Syne', sans-serif !important;
-    }
-    [data-testid="stSidebar"] [data-baseweb="select"] {
-        background: rgba(255,255,255,0.80) !important;
-        border-color: var(--border2) !important;
-        border-radius: 8px !important;
-    }
-    [data-testid="stSidebar"] [data-baseweb="select"] * {
-        background: rgba(255,255,255,0.90) !important;
-        color: var(--text) !important;
-        font-family: 'DM Mono', monospace !important;
-        font-size: 0.78rem !important;
-    }
-
-    /* ── Sidebar 分隔線 ── */
-    [data-testid="stSidebar"] hr {
-        border-color: var(--border) !important;
-        margin: 0.8rem 0 !important;
-    }
-
-    /* ── 隱藏 Streamlit sidebar nav 預設樣式 ── */
-    [data-testid="stSidebarNav"] { display: none; }
-
-    /* ── 用 data attribute 鎖定有 panel class 的 container ── */
-    [data-testid="stVerticalBlock"]:has(> [data-panel-id]) {
-        background: var(--surface);
-        border: 1px solid var(--border2);
-        border-radius: var(--radius);
-        padding: 1.5rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 16px rgba(139,92,246,0.06);
+        color: var(--accent);
+        padding: 3px 0;
+        border-bottom: 1px solid var(--border);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
     </style>
     """,
@@ -1218,7 +1368,6 @@ def _render_stat_cards(results: list[CollectedItem]) -> None:
 def _render_results_table(results: list[CollectedItem]) -> None:
     st.markdown('<div class="panel-title">爬取結果</div>', unsafe_allow_html=True)
 
-    # 篩選列
     col_filter, col_search = st.columns([2, 3])
     with col_filter:
         sb_default = st.session_state.get("sb_filter", "全部")
@@ -1261,7 +1410,6 @@ def _render_results_table(results: list[CollectedItem]) -> None:
     )
 
     for item in filtered:
-        # 類型標籤
         if item.content_type == ContentType.PRODUCT:
             badge = '<span class="type-badge badge-product">商品</span>'
         elif item.content_type == ContentType.VIDEO:
@@ -1269,7 +1417,6 @@ def _render_results_table(results: list[CollectedItem]) -> None:
         else:
             badge = '<span class="type-badge badge-unknown">未知</span>'
 
-        # 標籤 chips（最多5個）
         tag_html = "".join(f'<span class="tag-chip">{t}</span>' for t in item.tags[:5])
         if len(item.tags) > 5:
             tag_html += f'<span class="tag-chip">+{len(item.tags)-5}</span>'
@@ -1287,8 +1434,7 @@ def _render_results_table(results: list[CollectedItem]) -> None:
                 <div style="margin-top:4px">{tag_html}</div>
             </div>
             <div class="platform-name">{item.source_platform or '—'}</div>
-            <div>
-                {'<span style="color:#ef4444;font-size:0.72rem;font-family:DM Mono">'+item.error+'</span>' if item.error else tag_html and ''}</div>
+            <div>{'<span style="color:#ef4444;font-size:0.72rem;font-family:DM Mono">'+item.error+'</span>' if item.error else ''}</div>
             <div class="time-ms">
                 <span class="{status_cls}">{status_icon}</span>
                 <br>{item.fetch_time_ms} ms
@@ -1300,36 +1446,31 @@ def _render_results_table(results: list[CollectedItem]) -> None:
 
 
 def _render_tag_extractor_panel() -> None:
-
     with st.container(border=True):
         st.markdown(
             '<div class="panel-title">🏷 自訂 Tag 擷取</div>',
             unsafe_allow_html=True,
         )
 
-        # ── 目標 URL ──
         target_url = st.text_input(
             "目標 URL",
             placeholder="https://example.com",
             key="tag_extract_url",
         )
 
-        # ── 動態查詢列 ──
         st.markdown(
             "<p style='font-size:0.8rem;color:#7c6fa0;margin:0.8rem 0 0.4rem'>"
             "查詢條件（可新增多列）</p>",
             unsafe_allow_html=True,
         )
 
-        # session state 初始化查詢列
         if "tag_queries" not in st.session_state:
             st.session_state["tag_queries"] = [{"selector": "", "attribute": ""}]
 
         queries = st.session_state["tag_queries"]
 
-        # 渲染每一列
         for i, q in enumerate(queries):
-            col_sel, col_attr, col_del = st.columns([4, 3, 1],vertical_alignment="bottom")
+            col_sel, col_attr, col_del = st.columns([4, 3, 1], vertical_alignment="bottom")
             with col_sel:
                 queries[i]["selector"] = st.text_input(
                     f"CSS Selector #{i+1}",
@@ -1351,7 +1492,6 @@ def _render_tag_extractor_panel() -> None:
                     queries.pop(i)
                     st.rerun()
 
-        # 新增列按鈕
         col_add, col_run = st.columns([1, 3])
         with col_add:
             if st.button("＋ 新增條件", width='stretch'):
@@ -1365,7 +1505,6 @@ def _render_tag_extractor_panel() -> None:
                 key="tag_extract_btn",
             )
 
-        # 選項列
         col_opt1, col_opt2 = st.columns(2)
         with col_opt1:
             max_nodes = st.number_input(
@@ -1381,7 +1520,7 @@ def _render_tag_extractor_panel() -> None:
                 value=False,
                 key="tag_show_html",
             )
-            
+
         col_browser, col_scroll = st.columns(2)
         with col_browser:
             use_browser = st.checkbox(
@@ -1396,9 +1535,9 @@ def _render_tag_extractor_panel() -> None:
                 value=False,
                 help="捲動頁面觸發 lazy-load，商品列表頁建議開啟",
                 key="tag_scroll_bottom",
-                disabled=not use_browser,  # 靜態模式下無效，自動 disable
+                disabled=not use_browser,
             )
-    # ── 執行爬取 ──
+
     if extract_btn:
         valid_queries = [
             (q["selector"], q["attribute"]) for q in queries if q["selector"].strip()
@@ -1420,7 +1559,6 @@ def _render_tag_extractor_panel() -> None:
                 )
             st.session_state["tag_extract_result"] = result
 
-    # ── 結果渲染 ──
     if "tag_extract_result" in st.session_state:
         result: CustomTagCrawlResult = st.session_state["tag_extract_result"]
 
@@ -1461,6 +1599,296 @@ def _render_tag_extractor_panel() -> None:
                                 st.code(html, language="html")
 
 
+def _render_two_stage_pipeline_panel() -> None:
+    """二階段工作流 UI 面板：列表頁 → 擷取連結 → 深度爬取詳情頁"""
+    with st.container(border=True):
+        st.markdown(
+            '<div class="panel-title">🔗 二階段工作流（列表頁 → 詳情頁）</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Stage 1 設定 ──────────────────────────────────
+        st.markdown(
+            '<div class="pipeline-stage-header stage1-header">🟦 Stage 1 — 列表頁（擷取連結）</div>',
+            unsafe_allow_html=True,
+        )
+
+        col_url1, col_sel1 = st.columns([3, 2])
+        with col_url1:
+            list_url = st.text_input(
+                "列表頁 URL",
+                placeholder="https://example.com/products",
+                key="pipeline_list_url",
+                help="要爬取的商品列表頁或文章列表頁網址",
+            )
+        with col_sel1:
+            s1_selector = st.text_input(
+                "連結 Selector",
+                placeholder="a.product-link",
+                key="pipeline_s1_selector",
+                help="指向 <a> 標籤的 CSS selector，系統自動抓取 href 屬性",
+            )
+
+        col_b1, col_sc1 = st.columns(2)
+        with col_b1:
+            s1_browser = st.checkbox(
+                "🌐 瀏覽器渲染",
+                key="pipeline_s1_browser",
+                help="列表頁若是 JS 動態渲染（如蝦皮、momo）請開啟",
+            )
+        with col_sc1:
+            s1_scroll = st.checkbox(
+                "📜 自動捲動",
+                key="pipeline_s1_scroll",
+                disabled=not s1_browser,
+                help="捲動到底部觸發 lazy-load，適合商品列表",
+            )
+
+        st.divider()
+
+        # ── Stage 2 設定 ──────────────────────────────────
+        st.markdown(
+            '<div class="pipeline-stage-header stage2-header">🟩 Stage 2 — 詳情頁（深度擷取）</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("設定從每個詳情頁要擷取的欄位，可新增多筆（如標題、價格、描述等）")
+
+        if "pipeline_s2_queries" not in st.session_state:
+            st.session_state["pipeline_s2_queries"] = [{"selector": "", "attribute": ""}]
+
+        s2_queries = st.session_state["pipeline_s2_queries"]
+
+        for i, q in enumerate(s2_queries):
+            col_s, col_a, col_d = st.columns([3, 2, 1], vertical_alignment="bottom")
+            with col_s:
+                q["selector"] = st.text_input(
+                    f"S2 Selector #{i+1}",
+                    value=q["selector"],
+                    placeholder="h1.title 或 span.price",
+                    key=f"pipeline_s2_sel_{i}",
+                    label_visibility="collapsed" if i > 0 else "visible",
+                )
+            with col_a:
+                q["attribute"] = st.text_input(
+                    f"S2 Attribute #{i+1}",
+                    value=q["attribute"],
+                    placeholder="留空=文字 / href / src",
+                    key=f"pipeline_s2_attr_{i}",
+                    label_visibility="collapsed" if i > 0 else "visible",
+                )
+            with col_d:
+                if st.button("✕", key=f"pipeline_s2_del_{i}", disabled=len(s2_queries) == 1):
+                    s2_queries.pop(i)
+                    st.rerun()
+
+        col_add2, _ = st.columns([1, 3])
+        with col_add2:
+            if st.button("＋ 新增欄位", key="pipeline_s2_add", width="stretch"):
+                s2_queries.append({"selector": "", "attribute": ""})
+                st.rerun()
+
+        col_b2, col_sc2, col_dom, col_mp = st.columns(4)
+        with col_b2:
+            s2_browser = st.checkbox(
+                "🌐 瀏覽器渲染",
+                key="pipeline_s2_browser",
+                help="詳情頁若是 JS 動態渲染請開啟",
+            )
+        with col_sc2:
+            s2_scroll = st.checkbox(
+                "📜 自動捲動",
+                key="pipeline_s2_scroll",
+                disabled=not s2_browser,
+            )
+        with col_dom:
+            same_domain = st.checkbox(
+                "🔒 限同網域",
+                value=True,
+                key="pipeline_same_domain",
+                help="只爬取與列表頁同網域的連結（強烈建議保持開啟）",
+            )
+        with col_mp:
+            max_pages = st.number_input(
+                "最多詳情頁數",
+                min_value=1,
+                max_value=50,
+                value=10,
+                key="pipeline_max_pages",
+                help="Stage 2 最多爬取幾個詳情頁，防止無限爬取",
+            )
+
+        # ── 執行按鈕 ──────────────────────────────────────
+        col_run_btn, col_clear_btn = st.columns([3, 1])
+        with col_run_btn:
+            run_pipeline_btn = st.button(
+                "🚀 執行工作流",
+                type="primary",
+                width="stretch",
+                key="pipeline_run_btn",
+            )
+        with col_clear_btn:
+            if st.button("清除結果", width="stretch", key="pipeline_clear_btn"):
+                if "pipeline_result" in st.session_state:
+                    del st.session_state["pipeline_result"]
+                st.rerun()
+
+    # ── 執行邏輯 ──────────────────────────────────────────
+    if run_pipeline_btn:
+        valid_s2 = [
+            (q["selector"], q["attribute"])
+            for q in s2_queries
+            if q["selector"].strip()
+        ]
+        if not list_url:
+            st.warning("請輸入列表頁 URL")
+        elif not s1_selector:
+            st.warning("請輸入 Stage 1 的連結 Selector")
+        elif not valid_s2:
+            st.warning("請至少設定一個 Stage 2 擷取條件")
+        else:
+            stage1_cfg = StageConfig(
+                selectors=[(s1_selector, "href")],
+                label="Stage 1 - 列表頁",
+                use_browser=s1_browser,
+                scroll_to_bottom=s1_scroll,
+            )
+            stage2_cfg = StageConfig(
+                selectors=valid_s2,
+                label="Stage 2 - 詳情頁",
+                use_browser=s2_browser,
+                scroll_to_bottom=s2_scroll,
+            )
+            # Stage 2 用保守設定：低並發 + 高延遲，對目標網站友善
+            crawler_cfg = CrawlerConfig(
+                max_concurrency=2,
+                request_delay=2.0,
+                timeout=15.0,
+                respect_robots=True,
+            )
+
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            status_text.markdown(
+                '<p style="font-size:0.8rem;color:#64748b;font-family:DM Mono,monospace">準備執行工作流...</p>',
+                unsafe_allow_html=True,
+            )
+
+            def on_progress(current: int, total: int, url: str) -> None:
+                pct = current / total if total > 0 else 0
+                progress_bar.progress(pct)
+                status_text.markdown(
+                    f'<p style="font-size:0.8rem;color:#64748b;font-family:DM Mono,monospace">'
+                    f'Stage 2 [{current}/{total}] 正在爬取：{url[:65]}...</p>',
+                    unsafe_allow_html=True,
+                )
+
+            with st.spinner("工作流執行中，請稍候..."):
+                pipeline_result = run_two_stage_pipeline_sync(
+                    source_url=list_url,
+                    stage1_cfg=stage1_cfg,
+                    stage2_cfg=stage2_cfg,
+                    crawler_cfg=crawler_cfg,
+                    same_domain_only=same_domain,
+                    max_detail_pages=int(max_pages),
+                    progress_callback=on_progress,
+                )
+
+            progress_bar.progress(1.0)
+            st.session_state["pipeline_result"] = pipeline_result
+
+    # ── 結果渲染 ──────────────────────────────────────────
+    if "pipeline_result" in st.session_state:
+        res: TwoStagePipelineResult = st.session_state["pipeline_result"]
+
+        if res.error:
+            st.error(f"❌ 工作流失敗：{res.error}")
+        else:
+            n_ok = sum(1 for r in res.stage2_results if not r.error)
+            n_fail = len(res.stage2_results) - n_ok
+            st.success(
+                f"✅ 工作流完成 · "
+                f"擷取連結 {len(res.extracted_links)} 條 · "
+                f"詳情頁成功 {n_ok} / 失敗 {n_fail} · "
+                f"總耗時 {res.total_fetch_time_ms / 1000:.1f}s"
+            )
+
+            # ── Stage 1 連結預覽 ──
+            with st.expander(f"📋 Stage 1 擷取的連結（共 {len(res.extracted_links)} 筆）"):
+                for link in res.extracted_links:
+                    st.markdown(
+                        f"<div class='pipeline-link-item'>{link}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            # ── Stage 2 詳情頁結果 ──
+            st.markdown(
+                "<p style='font-size:0.8rem;font-weight:700;color:#065f46;"
+                "margin:1rem 0 0.5rem'>Stage 2 詳情頁結果</p>",
+                unsafe_allow_html=True,
+            )
+
+            for page_result in res.stage2_results:
+                status_icon = "❌" if page_result.error else "✅"
+                short_url = page_result.source_url
+                if len(short_url) > 80:
+                    short_url = short_url[:77] + "..."
+
+                with st.expander(f"{status_icon} {short_url}  ({page_result.fetch_time_ms} ms)"):
+                    if page_result.error:
+                        st.error(page_result.error)
+                        continue
+
+                    for tag_res in page_result.tag_results:
+                        attr_label = tag_res.attribute if tag_res.attribute else "文字"
+                        st.markdown(
+                            f"<p style='font-size:0.72rem;font-family:DM Mono,monospace;"
+                            f"color:#7c6fa0;margin:0.5rem 0 0.2rem'>"
+                            f"<b style='color:#1e1b4b'>`{tag_res.selector}`</b>"
+                            f" [{attr_label}] — {len(tag_res.contents)} 筆</p>",
+                            unsafe_allow_html=True,
+                        )
+                        for content in tag_res.contents[:8]:
+                            st.markdown(
+                                f"<div style='font-size:0.83rem;padding:4px 10px;"
+                                f"border-left:3px solid #8b5cf6;margin:3px 0;"
+                                f"background:rgba(139,92,246,0.04);border-radius:0 4px 4px 0'>"
+                                f"{content}</div>",
+                                unsafe_allow_html=True,
+                            )
+
+            # ── Pipeline 匯出 ──
+            if res.stage2_results:
+                st.markdown("---")
+                st.markdown(
+                    '<div class="panel-title">匯出 Pipeline 結果</div>',
+                    unsafe_allow_html=True,
+                )
+                pipeline_df = _pipeline_results_to_dataframe(res)
+
+                dl1, dl2 = st.columns(2)
+                with dl1:
+                    st.download_button(
+                        label="📥 下載 CSV",
+                        data=pipeline_df.to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"pipeline_results_{int(time.time())}.csv",
+                        mime="text/csv",
+                        width="stretch",
+                    )
+                with dl2:
+                    st.download_button(
+                        label="📥 下載 JSON",
+                        data=pipeline_df.to_json(
+                            orient="records", force_ascii=False, indent=2
+                        ).encode("utf-8"),
+                        file_name=f"pipeline_results_{int(time.time())}.json",
+                        mime="application/json",
+                        width="stretch",
+                    )
+
+                with st.expander("📊 查看完整 Pipeline 資料表"):
+                    st.dataframe(pipeline_df, width="stretch", height=400)
+
+
 def _to_dataframe(results: list[CollectedItem]) -> pd.DataFrame:
     rows = []
     for item in results:
@@ -1495,14 +1923,13 @@ def show() -> None:
 
     # ── Session state 初始化 ────────────────────────────────
     if "crawl_history" not in st.session_state:
-        st.session_state["crawl_history"] = []  # list of dict
+        st.session_state["crawl_history"] = []
     if "sb_filter" not in st.session_state:
         st.session_state["sb_filter"] = "全部"
 
     # ── Sidebar ──────────────────────────────────────────
     with st.sidebar:
 
-        # ▌ Logo / 標題
         st.markdown(
             """
         <div style='padding:1rem 0 0.5rem;border-bottom:1px solid rgba(148,130,210,0.22);margin-bottom:0.5rem'>
@@ -1512,93 +1939,53 @@ def show() -> None:
                 🕸 Crawler
             </div>
             <div style='font-size:0.62rem;color:#7c6fa0;font-family:DM Mono,monospace;margin-top:2px'>
-                StProject · v1.0
+                StProject · v1.1
             </div>
         </div>
         """,
             unsafe_allow_html=True,
         )
 
-        # ════════════════════════════════
-        # 區塊 1：爬蟲參數
-        # ════════════════════════════════
+        # ── 爬蟲參數 ──
         st.markdown(
             '<div class="sb-section"><div class="sb-section-title">爬蟲參數</div></div>',
             unsafe_allow_html=True,
         )
+        concurrency = st.slider("⚡ 並發數", min_value=1, max_value=8, value=3,
+                                help="同時爬取的連結數，建議 ≤ 5")
+        delay = st.slider("⏱ 請求間隔（秒）", min_value=0.5, max_value=5.0,
+                          value=1.5, step=0.5, help="每次請求的等待時間，值越高對目標越友善")
+        timeout = st.slider("⌛ 逾時上限（秒）", min_value=5, max_value=30,
+                            value=15, help="單頁最長等待時間")
+        max_urls = st.slider("📋 單批上限", min_value=5, max_value=50,
+                             value=20, step=5, help="單次爬取的 URL 數量上限")
 
-        concurrency = st.slider(
-            "⚡ 並發數",
-            min_value=1,
-            max_value=8,
-            value=3,
-            help="同時爬取的連結數，建議 ≤ 5",
-        )
-        delay = st.slider(
-            "⏱ 請求間隔（秒）",
-            min_value=0.5,
-            max_value=5.0,
-            value=1.5,
-            step=0.5,
-            help="每次請求的等待時間，值越高對目標越友善",
-        )
-        timeout = st.slider(
-            "⌛ 逾時上限（秒）",
-            min_value=5,
-            max_value=30,
-            value=15,
-            help="單頁最長等待時間",
-        )
-        max_urls = st.slider(
-            "📋 單批上限",
-            min_value=5,
-            max_value=50,
-            value=20,
-            step=5,
-            help="單次爬取的 URL 數量上限",
-        )
-
-        # ════════════════════════════════
-        # 區塊 2：內容設定
-        # ════════════════════════════════
+        # ── 內容設定 ──
         st.markdown(
             '<div class="sb-section"><div class="sb-section-title">內容設定</div></div>',
             unsafe_allow_html=True,
         )
-
         content_mode = st.selectbox(
             "🎯 內容類型",
             ["自動偵測", "僅商品", "僅影片"],
             help="強制指定解析模式，或讓系統自動判斷",
         )
-        max_tags = st.slider(
-            "🏷 標籤數量上限",
-            min_value=3,
-            max_value=20,
-            value=10,
-            help="每筆結果保留的標籤數量",
-        )
-        include_thumbnail = st.checkbox(
-            "縮圖連結", value=True, help="是否擷取 og:image 縮圖 URL"
-        )
+        max_tags = st.slider("🏷 標籤數量上限", min_value=3, max_value=20,
+                             value=10, help="每筆結果保留的標籤數量")
+        include_thumbnail = st.checkbox("縮圖連結", value=True,
+                                        help="是否擷取 og:image 縮圖 URL")
 
-        # ════════════════════════════════
-        # 區塊 3：合規控制
-        # ════════════════════════════════
+        # ── 合規控制 ──
         st.markdown(
             '<div class="sb-section"><div class="sb-section-title">合規控制</div></div>',
             unsafe_allow_html=True,
         )
-
-        respect_robots = st.checkbox(
-            "遵守 robots.txt", value=True, help="建議保持開啟，自動跳過禁止爬取的頁面"
-        )
-        enable_dedup = st.checkbox(
-            "URL 去重複", value=True, help="自動移除重複的輸入 URL"
-        )
-        strip_personal = st.checkbox(
-            "個資自動過濾", value=True, help="自動遮蔽結果中的電話、Email 等個人資料"
-        )
+        respect_robots = st.checkbox("遵守 robots.txt", value=True,
+                                     help="建議保持開啟，自動跳過禁止爬取的頁面")
+        enable_dedup = st.checkbox("URL 去重複", value=True,
+                                   help="自動移除重複的輸入 URL")
+        strip_personal = st.checkbox("個資自動過濾", value=True,
+                                     help="自動遮蔽結果中的電話、Email 等個人資料")
 
         st.markdown(
             """
@@ -1615,25 +2002,18 @@ def show() -> None:
             unsafe_allow_html=True,
         )
 
-        # ════════════════════════════════
-        # 區塊 4：結果快篩（有結果時才顯示）
-        # ════════════════════════════════
+        # ── 結果快篩 ──
         if "crawl_results" in st.session_state:
             results_snapshot = st.session_state["crawl_results"]
             n_total = len(results_snapshot)
-            n_product = sum(
-                1 for r in results_snapshot if r.content_type == ContentType.PRODUCT
-            )
-            n_video = sum(
-                1 for r in results_snapshot if r.content_type == ContentType.VIDEO
-            )
+            n_product = sum(1 for r in results_snapshot if r.content_type == ContentType.PRODUCT)
+            n_video = sum(1 for r in results_snapshot if r.content_type == ContentType.VIDEO)
             n_fail = sum(1 for r in results_snapshot if r.error)
 
             st.markdown(
                 '<div class="sb-section"><div class="sb-section-title">結果快篩</div></div>',
                 unsafe_allow_html=True,
             )
-
             st.markdown(
                 f"""
             <div class="sb-filter-grid">
@@ -1647,7 +2027,6 @@ def show() -> None:
             """,
                 unsafe_allow_html=True,
             )
-
             sb_filter = st.radio(
                 "快篩",
                 ["全部", "商品", "影片", "未知", "失敗"],
@@ -1657,16 +2036,14 @@ def show() -> None:
             )
             st.session_state["sb_filter"] = sb_filter
 
-        # ════════════════════════════════
-        # 區塊 5：爬取歷史
-        # ════════════════════════════════
+        # ── 爬取歷史 ──
         history = st.session_state.get("crawl_history", [])
         if history:
             st.markdown(
                 '<div class="sb-section"><div class="sb-section-title">爬取歷史</div></div>',
                 unsafe_allow_html=True,
             )
-            for i, rec in enumerate(reversed(history[-5:])):
+            for rec in reversed(history[-5:]):
                 st.markdown(
                     f"""
                 <div class="sb-history-item">
@@ -1679,7 +2056,7 @@ def show() -> None:
                 """,
                     unsafe_allow_html=True,
                 )
-            if st.button("🗑  清除歷史", width='stretch'):
+            if st.button("🗑  清除歷史", width="stretch"):
                 st.session_state["crawl_history"] = []
                 st.rerun()
 
@@ -1687,21 +2064,18 @@ def show() -> None:
     col_input, col_preview = st.columns([3, 2], gap="large")
 
     with col_input:
-        st.markdown(
-            '<div class="panel-title">目標 URL 輸入</div>', unsafe_allow_html=True
-        )
+        st.markdown('<div class="panel-title">目標 URL 輸入</div>', unsafe_allow_html=True)
         url_input = st.text_area(
             "URLs",
             height=200,
             placeholder="每行輸入一個 URL，例如：\nhttps://shopee.tw/product/xxx\nhttps://www.youtube.com/watch?v=xxx",
             label_visibility="collapsed",
         )
-
         col_btn, col_clear = st.columns([2, 1])
         with col_btn:
-            start_btn = st.button("🚀  開始爬取", width='stretch')
+            start_btn = st.button("🚀  開始爬取", width="stretch")
         with col_clear:
-            if st.button("清除結果", width='stretch'):
+            if st.button("清除結果", width="stretch"):
                 for key in ["crawl_results", "crawl_df"]:
                     if key in st.session_state:
                         del st.session_state[key]
@@ -1737,7 +2111,6 @@ def show() -> None:
     if start_btn:
         raw_urls = [u.strip() for u in url_input.splitlines() if u.strip()]
 
-        # URL 去重複（由 sidebar 控制）
         urls = list(dict.fromkeys(raw_urls)) if enable_dedup else raw_urls
         dedup_removed = len(raw_urls) - len(urls)
         if dedup_removed > 0:
@@ -1767,7 +2140,7 @@ def show() -> None:
                 results = run_crawl(urls, config)
                 elapsed = time.monotonic() - start_time
 
-            # ── 套用 content_mode 強制覆蓋類型 ──
+            # 套用 content_mode 強制覆蓋類型
             if content_mode == "僅商品":
                 for r in results:
                     if not r.error:
@@ -1777,16 +2150,16 @@ def show() -> None:
                     if not r.error:
                         r.content_type = ContentType.VIDEO
 
-            # ── 截斷標籤數量 ──
+            # 截斷標籤數量
             for r in results:
                 r.tags = r.tags[:max_tags]
 
-            # ── 移除縮圖（若未勾選）──
+            # 移除縮圖（若未勾選）
             if not include_thumbnail:
                 for r in results:
                     r.thumbnail_url = None
 
-            # ── 個資過濾 ──
+            # 個資過濾
             if strip_personal:
                 import re as _re
 
@@ -1810,7 +2183,6 @@ def show() -> None:
             st.session_state["crawl_results"] = results
             st.session_state["crawl_df"] = _to_dataframe(results)
 
-            # ── 寫入歷史記錄 ──
             import datetime as _dt
 
             st.session_state["crawl_history"].append(
@@ -1830,10 +2202,16 @@ def show() -> None:
         st.markdown("---")
         _render_stat_cards(results)
         _render_results_table(results)
+
         # ── 自訂 Tag 擷取面板 ──
         st.divider()
         _render_tag_extractor_panel()
-        # 下載區
+
+        # ── 二階段工作流面板 ──
+        st.divider()
+        _render_two_stage_pipeline_panel()
+
+        # ── 匯出資料 ──
         st.markdown('<div class="panel-title">匯出資料</div>', unsafe_allow_html=True)
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
@@ -1842,22 +2220,26 @@ def show() -> None:
                 data=df.to_csv(index=False).encode("utf-8-sig"),
                 file_name=f"crawl_results_{int(time.time())}.csv",
                 mime="text/csv",
-                width='stretch',
+                width="stretch",
             )
         with dl_col2:
             st.download_button(
                 label="📥  下載 JSON",
-                data=df.to_json(orient="records", force_ascii=False, indent=2).encode(
-                    "utf-8"
-                ),
+                data=df.to_json(orient="records", force_ascii=False, indent=2).encode("utf-8"),
                 file_name=f"crawl_results_{int(time.time())}.json",
                 mime="application/json",
-                width='stretch',
+                width="stretch",
             )
 
-        # 展開原始表格
         with st.expander("📊 查看完整資料表"):
-            st.dataframe(df, width='stretch', height=400)
+            st.dataframe(df, width="stretch", height=400)
+
+    else:
+        # 尚無爬取結果時也顯示工作流面板（讓使用者可以直接使用 Pipeline）
+        st.divider()
+        _render_tag_extractor_panel()
+        st.divider()
+        _render_two_stage_pipeline_panel()
 
 
 # 直接執行時使用
