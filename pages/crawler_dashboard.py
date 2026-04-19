@@ -261,6 +261,61 @@ def parse_generic(
 
 
 # ════════════════════════════════════════════════════════
+#  Playwright 瀏覽器渲染核心
+# ════════════════════════════════════════════════════════
+
+
+def fetch_with_browser_sync(
+    url: str,
+    wait_selector: str = "body",
+    timeout_ms: int = 20000,
+    scroll_to_bottom: bool = False,
+) -> tuple[str, str]:
+    """
+    透過獨立子程序執行 Playwright，完全迴避 Windows event loop 衝突。
+    回傳 (html, final_url)。
+    """
+    import sys
+    import json
+    import subprocess
+    from pathlib import Path
+
+    # 找到 playwright_runner.py 的絕對路徑
+    runner_path = Path(__file__).parent.parent / "playwright_runner.py"
+    if not runner_path.exists():
+        raise FileNotFoundError(
+            f"找不到 playwright_runner.py，請確認放在專案根目錄：{runner_path}"
+        )
+
+    payload = json.dumps(
+        {
+            "url": url,
+            "wait_selector": wait_selector,
+            "timeout_ms": timeout_ms,
+            "scroll_to_bottom": scroll_to_bottom,
+        },
+        ensure_ascii=False,
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(runner_path)],
+        input=payload.encode("utf-8"),   # ← 輸入也用 utf-8
+        capture_output=True,
+        timeout=timeout_ms / 1000 + 10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"playwright_runner 執行失敗：\n{result.stderr.decode('utf-8', errors='replace')}"
+        )
+        
+    output = json.loads(result.stdout.decode("utf-8"))  # ← 手動 decode
+
+    if output.get("error"):
+        raise RuntimeError(f"Playwright 錯誤：{output['error']}")
+
+    return output["html"], output["final_url"]
+
+# ════════════════════════════════════════════════════════
 #  爬蟲核心
 # ════════════════════════════════════════════════════════
 
@@ -363,6 +418,206 @@ def run_crawl(urls: list[str], config: CrawlerConfig) -> list[CollectedItem]:
     asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(run_crawl_async(urls, config))
+    finally:
+        loop.close()
+
+
+# ════════════════════════════════════════════════════════
+#  自訂 Tag 擷取
+# ════════════════════════════════════════════════════════
+
+
+@dataclass
+class TagExtractResult:
+    """單一 selector 的擷取結果"""
+
+    selector: str
+    attribute: str
+    matched_count: int
+    contents: list[str]  # 每個節點的文字內容
+    html_snippets: list[str]  # 每個節點的 outer HTML（供預覽）
+    error: Optional[str] = None
+
+
+@dataclass
+class CustomTagCrawlResult:
+    """單一 URL + 多個 selector 的完整結果"""
+
+    url: str
+    fetch_time_ms: int
+    tag_results: list[TagExtractResult]
+    error: Optional[str] = None
+
+
+def extract_tags_from_tree(
+    tree: HTMLParser,
+    queries: list[tuple[str, str]],
+    max_nodes_per_selector: int = 20,
+    text_max_len: int = 500,
+    base_url: str = "",  # ← 新增：用來補全相對路徑
+) -> list[TagExtractResult]:
+    """
+    從已解析的 HTMLParser 中，依序擷取每個 CSS selector 對應的內容。
+
+    Args:
+        queries: [(selector, attribute), ...]
+                 attribute 為空字串時取節點文字內容
+                 attribute 為 "href"/"src" 等時取對應屬性值
+
+    Returns:
+        每個 selector 對應的 TagExtractResult 列表
+    """
+    results: list[TagExtractResult] = []
+
+    for selector, attribute in queries:
+        selector = selector.strip()
+        attribute = attribute.strip()
+        if not selector:
+            continue
+        try:
+            nodes = tree.css(selector)[:max_nodes_per_selector]
+            contents: list[str] = []
+            html_snippets: list[str] = []
+
+            for node in nodes:
+                if attribute:
+                    # 取指定屬性值
+                    value = node.attributes.get(attribute, "")
+                    # href / src 補全相對路徑
+                    if (
+                        attribute in ("href", "src")
+                        and value
+                        and not value.startswith("http")
+                        and base_url
+                    ):
+                        value = urljoin(base_url, value)
+                    display = value
+                else:
+                    # 無指定屬性，取文字內容
+                    display = node.text(strip=True, separator=" ")
+
+                if display:
+                    contents.append(display[:text_max_len])
+                html_snippets.append((node.html or "")[:300])
+
+            results.append(
+                TagExtractResult(
+                    selector=selector,
+                    attribute=attribute or "（文字內容）",
+                    matched_count=len(nodes),
+                    contents=contents,
+                    html_snippets=html_snippets,
+                )
+            )
+
+        except Exception as e:
+            results.append(
+                TagExtractResult(
+                    selector=selector,
+                    attribute=attribute,
+                    matched_count=0,
+                    contents=[],
+                    html_snippets=[],
+                    error=f"Selector 錯誤：{e}",
+                )
+            )
+
+    return results
+
+
+async def fetch_and_extract_tags(
+    url: str,
+    queries: list[tuple[str, str]],
+    config: CrawlerConfig,
+    max_nodes: int = 20,
+    use_browser: bool = False,
+    scroll_to_bottom: bool = False,
+) -> CustomTagCrawlResult:
+    """
+    爬取單一 URL 並依照自訂 selector 擷取內容。
+    複用 CrawlerConfig 的 headers / timeout / retry 設定。
+    """
+
+    start = time.monotonic()
+
+    # 安全驗證
+    try:
+        CollectedItem(url=url, name="_validate_only")
+    except Exception as e:
+        return CustomTagCrawlResult(
+            url=url,
+            fetch_time_ms=0,
+            tag_results=[],
+            error=f"URL 安全驗證失敗：{e}",
+        )
+
+    try:
+        if use_browser:
+            wait_sel = queries[0][0] if queries else "body"
+            html, final_url = fetch_with_browser_sync(
+                url,
+                wait_selector=wait_sel,
+                timeout_ms=int(config.timeout * 1000),
+                scroll_to_bottom=scroll_to_bottom,
+            )
+        else:
+            async with httpx.AsyncClient(
+                headers=config.headers,
+                timeout=config.timeout,
+                http2=True,
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                html = resp.text
+                final_url = str(resp.url)
+
+        tree = HTMLParser(html)
+        for noise in tree.css("script, style, noscript"):
+            noise.decompose()
+
+        tag_results = extract_tags_from_tree(
+            tree, queries, max_nodes, base_url=final_url
+        )
+
+        return CustomTagCrawlResult(
+            url=url,
+            fetch_time_ms=int((time.monotonic() - start) * 1000),
+            tag_results=tag_results,
+        )
+
+    except Exception as e:
+        return CustomTagCrawlResult(
+            url=url,
+            fetch_time_ms=int((time.monotonic() - start) * 1000),
+            tag_results=[],
+            error=str(e),
+        )
+
+
+def run_tag_extract(
+    url: str,
+    queries: list[tuple[str, str]],  # ← 從 list[str] 改成 list[tuple[str, str]]
+    config: CrawlerConfig,
+    max_nodes: int = 20,
+    use_browser: bool = False,
+    scroll_to_bottom: bool = False,
+) -> CustomTagCrawlResult:
+
+    """Streamlit 同步包裝器"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(
+            fetch_and_extract_tags(
+                url,
+                queries,
+                config,
+                max_nodes,
+                use_browser=use_browser,
+                scroll_to_bottom=scroll_to_bottom,
+            )
+        )
     finally:
         loop.close()
 
@@ -888,6 +1143,16 @@ def _inject_styles() -> None:
 
     /* ── 隱藏 Streamlit sidebar nav 預設樣式 ── */
     [data-testid="stSidebarNav"] { display: none; }
+
+    /* ── 用 data attribute 鎖定有 panel class 的 container ── */
+    [data-testid="stVerticalBlock"]:has(> [data-panel-id]) {
+        background: var(--surface);
+        border: 1px solid var(--border2);
+        border-radius: var(--radius);
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 16px rgba(139,92,246,0.06);
+    }
     </style>
     """,
         unsafe_allow_html=True,
@@ -951,7 +1216,6 @@ def _render_stat_cards(results: list[CollectedItem]) -> None:
 
 
 def _render_results_table(results: list[CollectedItem]) -> None:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
     st.markdown('<div class="panel-title">爬取結果</div>', unsafe_allow_html=True)
 
     # 篩選列
@@ -1024,8 +1288,7 @@ def _render_results_table(results: list[CollectedItem]) -> None:
             </div>
             <div class="platform-name">{item.source_platform or '—'}</div>
             <div>
-                {'<span style="color:#ef4444;font-size:0.72rem;font-family:DM Mono">'+item.error+'</span>' if item.error else tag_html and ''}
-            </div>
+                {'<span style="color:#ef4444;font-size:0.72rem;font-family:DM Mono">'+item.error+'</span>' if item.error else tag_html and ''}</div>
             <div class="time-ms">
                 <span class="{status_cls}">{status_icon}</span>
                 <br>{item.fetch_time_ms} ms
@@ -1035,7 +1298,167 @@ def _render_results_table(results: list[CollectedItem]) -> None:
             unsafe_allow_html=True,
         )
 
-    st.markdown("</div>", unsafe_allow_html=True)
+
+def _render_tag_extractor_panel() -> None:
+
+    with st.container(border=True):
+        st.markdown(
+            '<div class="panel-title">🏷 自訂 Tag 擷取</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── 目標 URL ──
+        target_url = st.text_input(
+            "目標 URL",
+            placeholder="https://example.com",
+            key="tag_extract_url",
+        )
+
+        # ── 動態查詢列 ──
+        st.markdown(
+            "<p style='font-size:0.8rem;color:#7c6fa0;margin:0.8rem 0 0.4rem'>"
+            "查詢條件（可新增多列）</p>",
+            unsafe_allow_html=True,
+        )
+
+        # session state 初始化查詢列
+        if "tag_queries" not in st.session_state:
+            st.session_state["tag_queries"] = [{"selector": "", "attribute": ""}]
+
+        queries = st.session_state["tag_queries"]
+
+        # 渲染每一列
+        for i, q in enumerate(queries):
+            col_sel, col_attr, col_del = st.columns([4, 3, 1],vertical_alignment="bottom")
+            with col_sel:
+                queries[i]["selector"] = st.text_input(
+                    f"CSS Selector #{i+1}",
+                    value=q["selector"],
+                    placeholder="例：div.goods-list a",
+                    label_visibility="collapsed" if i > 0 else "visible",
+                    key=f"selector_{i}",
+                )
+            with col_attr:
+                queries[i]["attribute"] = st.text_input(
+                    f"屬性 #{i+1}",
+                    value=q["attribute"],
+                    placeholder="屬性名稱，留空=取文字",
+                    label_visibility="collapsed" if i > 0 else "visible",
+                    key=f"attribute_{i}",
+                )
+            with col_del:
+                if st.button("✕", key=f"del_{i}", disabled=len(queries) == 1):
+                    queries.pop(i)
+                    st.rerun()
+
+        # 新增列按鈕
+        col_add, col_run = st.columns([1, 3])
+        with col_add:
+            if st.button("＋ 新增條件", width='stretch'):
+                queries.append({"selector": "", "attribute": ""})
+                st.rerun()
+        with col_run:
+            extract_btn = st.button(
+                "🔍 開始擷取",
+                type="primary",
+                width='stretch',
+                key="tag_extract_btn",
+            )
+
+        # 選項列
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+            max_nodes = st.number_input(
+                "每個 Selector 最多節點數",
+                min_value=1,
+                max_value=50,
+                value=10,
+                key="tag_max_nodes",
+            )
+        with col_opt2:
+            show_html = st.checkbox(
+                "顯示原始 HTML 片段",
+                value=False,
+                key="tag_show_html",
+            )
+            
+        col_browser, col_scroll = st.columns(2)
+        with col_browser:
+            use_browser = st.checkbox(
+                "🌐 瀏覽器渲染模式",
+                value=False,
+                help="使用 Playwright 執行 JS，適用 momo、蝦皮等動態網站，速度較慢",
+                key="tag_use_browser",
+            )
+        with col_scroll:
+            scroll_to_bottom = st.checkbox(
+                "📜 自動捲動到底部",
+                value=False,
+                help="捲動頁面觸發 lazy-load，商品列表頁建議開啟",
+                key="tag_scroll_bottom",
+                disabled=not use_browser,  # 靜態模式下無效，自動 disable
+            )
+    # ── 執行爬取 ──
+    if extract_btn:
+        valid_queries = [
+            (q["selector"], q["attribute"]) for q in queries if q["selector"].strip()
+        ]
+        if not target_url:
+            st.warning("請輸入目標 URL。")
+        elif not valid_queries:
+            st.warning("請輸入至少一個 CSS Selector。")
+        else:
+            config = CrawlerConfig(max_concurrency=1, request_delay=1.0, timeout=15.0)
+            with st.spinner("擷取中..."):
+                result = run_tag_extract(
+                    target_url,
+                    valid_queries,
+                    config,
+                    max_nodes,
+                    use_browser=use_browser,
+                    scroll_to_bottom=scroll_to_bottom,
+                )
+            st.session_state["tag_extract_result"] = result
+
+    # ── 結果渲染 ──
+    if "tag_extract_result" in st.session_state:
+        result: CustomTagCrawlResult = st.session_state["tag_extract_result"]
+
+        with st.container(border=True):
+            if result.error:
+                st.error(f"❌ 爬取失敗：{result.error}")
+            else:
+                st.markdown(
+                    f"<p style='font-size:0.75rem;color:#64748b'>"
+                    f"✓ 耗時 {result.fetch_time_ms} ms · "
+                    f"{len(result.tag_results)} 個條件</p>",
+                    unsafe_allow_html=True,
+                )
+                for tag_result in result.tag_results:
+                    label = f"`{tag_result.selector}`"
+                    if tag_result.attribute:
+                        label += f" → `{tag_result.attribute}`"
+                    label += f"  （{tag_result.matched_count} 個節點）"
+
+                    with st.expander(label, expanded=True):
+                        if tag_result.error:
+                            st.error(tag_result.error)
+                            continue
+                        if not tag_result.contents:
+                            st.caption("無匹配內容。")
+                            continue
+                        for i, (text, html) in enumerate(
+                            zip(tag_result.contents, tag_result.html_snippets)
+                        ):
+                            st.markdown(
+                                f"<div style='font-size:0.875rem;padding:5px 0;"
+                                f"border-bottom:1px solid rgba(148,130,210,0.12)'>"
+                                f"<span style='color:#7c6fa0;font-family:DM Mono,monospace;"
+                                f"font-size:0.7rem'>#{i+1}</span>&nbsp;&nbsp;{text}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            if show_html:
+                                st.code(html, language="html")
 
 
 def _to_dataframe(results: list[CollectedItem]) -> pd.DataFrame:
@@ -1256,7 +1679,7 @@ def show() -> None:
                 """,
                     unsafe_allow_html=True,
                 )
-            if st.button("🗑  清除歷史", use_container_width=True):
+            if st.button("🗑  清除歷史", width='stretch'):
                 st.session_state["crawl_history"] = []
                 st.rerun()
 
@@ -1276,9 +1699,9 @@ def show() -> None:
 
         col_btn, col_clear = st.columns([2, 1])
         with col_btn:
-            start_btn = st.button("🚀  開始爬取", use_container_width=True)
+            start_btn = st.button("🚀  開始爬取", width='stretch')
         with col_clear:
-            if st.button("清除結果", use_container_width=True):
+            if st.button("清除結果", width='stretch'):
                 for key in ["crawl_results", "crawl_df"]:
                     if key in st.session_state:
                         del st.session_state[key]
@@ -1407,9 +1830,10 @@ def show() -> None:
         st.markdown("---")
         _render_stat_cards(results)
         _render_results_table(results)
-
+        # ── 自訂 Tag 擷取面板 ──
+        st.divider()
+        _render_tag_extractor_panel()
         # 下載區
-        st.markdown('<div class="panel">', unsafe_allow_html=True)
         st.markdown('<div class="panel-title">匯出資料</div>', unsafe_allow_html=True)
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
@@ -1418,7 +1842,7 @@ def show() -> None:
                 data=df.to_csv(index=False).encode("utf-8-sig"),
                 file_name=f"crawl_results_{int(time.time())}.csv",
                 mime="text/csv",
-                use_container_width=True,
+                width='stretch',
             )
         with dl_col2:
             st.download_button(
@@ -1428,13 +1852,12 @@ def show() -> None:
                 ),
                 file_name=f"crawl_results_{int(time.time())}.json",
                 mime="application/json",
-                use_container_width=True,
+                width='stretch',
             )
-        st.markdown("</div>", unsafe_allow_html=True)
 
         # 展開原始表格
         with st.expander("📊 查看完整資料表"):
-            st.dataframe(df, use_container_width=True, height=400)
+            st.dataframe(df, width='stretch', height=400)
 
 
 # 直接執行時使用
