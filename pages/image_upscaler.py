@@ -625,10 +625,6 @@ def main() -> None:
         .node-connector { text-align: center; font-size: 1.5rem; color: #e94560; margin: -8px 0; }
         .stExpander { border: 1px solid #e0e0e0 !important; border-radius: 8px !important; }
     </style>
-    <div class="pipeline-header">
-        <h1>🔬 圖像升解析度工作流</h1>
-        <p>ChaiNNer 風格的 AI 圖像處理管線 · PyTorch CUDA GPU 推理 + 人像細節強化</p>
-    </div>
     """,
         unsafe_allow_html=True,
     )
