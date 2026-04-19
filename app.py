@@ -46,7 +46,7 @@ def show_login() -> None:
             password = st.text_input(
                 "🔒 密碼", type="password", placeholder="請輸入密碼"
             )
-            submit = st.form_submit_button("登入", use_container_width=True)
+            submit = st.form_submit_button("登入", width='stretch')
 
         if submit:
             if verify_password(username, password):
@@ -75,11 +75,11 @@ def show_main() -> None:
         st.divider()
         page = st.radio(
             "導覽選單",
-            ["🏠 首頁", "📊 儀表板", "⚙️ 設定"],
+            ["🏠 首頁", "📊 儀表板", "⚙️ 設定", "爬蟲"],
             label_visibility="collapsed",
         )
         st.divider()
-        if st.button("🚪 登出", use_container_width=True):
+        if st.button("🚪 登出", width='stretch'):
             delete_session(st.session_state.sid)
             st.session_state.logged_in = False
             st.session_state.username = ""
@@ -99,6 +99,10 @@ def show_main() -> None:
         from pages import settings
 
         settings.show()
+    elif page == "爬蟲":
+        from pages import crawler_dashboard
+
+        crawler_dashboard.show()
 
 
 # ── 路由 ──────────────────────────────────────────────────────────────────────

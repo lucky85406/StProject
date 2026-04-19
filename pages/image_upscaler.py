@@ -645,7 +645,7 @@ def main() -> None:
             col_v1, col_v2 = st.columns(2)
             col_v1.metric("總 VRAM", device_info["vram"])
             col_v2.metric("已用 VRAM", device_info["vram_used"])
-            if st.sidebar.button("🧹 釋放 GPU 快取", use_container_width=True):
+            if st.sidebar.button("🧹 釋放 GPU 快取", width='stretch'):
                 torch.cuda.empty_cache()
                 st.sidebar.success("✅ GPU 快取已清除")
                 st.rerun()
@@ -676,7 +676,7 @@ def main() -> None:
             format_func=lambda x: f"{'✅' if x in available_models else '⬜'} {x}",
         )
         progress_ph = st.empty()
-        if st.button("⬇️ 下載", use_container_width=True):
+        if st.button("⬇️ 下載", width='stretch'):
             success = download_model(model_to_download, progress_ph)
             if success:
                 st.cache_resource.clear()
@@ -751,7 +751,7 @@ def main() -> None:
         new_node_name = col_select.selectbox(
             "新增節點類型", node_options, key="new_node_type"
         )
-        if col_add.button("＋ 新增", use_container_width=True):
+        if col_add.button("＋ 新增", width='stretch'):
             defaults: dict[str, dict] = {
                 "AI 超解析度": {"model": "EDSR", "scale": 4},
                 "雙三次插值升解析度": {"scale": 2},
@@ -787,11 +787,11 @@ def main() -> None:
             st.image(
                 original_pil,
                 caption=f"原始圖片 — {original_pil.width}×{original_pil.height}px",
-                use_container_width=True,
+                width='stretch',
             )
             st.divider()
 
-            if st.button("🚀 執行工作流", use_container_width=True, type="primary"):
+            if st.button("🚀 執行工作流", width='stretch', type="primary"):
                 enabled_count = sum(
                     1 for n in st.session_state.pipeline_nodes if n.enabled
                 )
@@ -814,7 +814,7 @@ def main() -> None:
                     st.image(
                         result.image,
                         caption=f"處理結果 — {result.output_size[0]}×{result.output_size[1]}px",
-                        use_container_width=True,
+                        width='stretch',
                     )
                     m1, m2, m3, m4, m5 = st.columns(5)
                     orig_w, orig_h = result.original_size
@@ -834,7 +834,7 @@ def main() -> None:
                         st.image(
                             result.image,
                             caption=f"處理結果 — {result.output_size[0]}×{result.output_size[1]}px",
-                            use_container_width=True,
+                            width='stretch',
                         )
 
                         # 下載按鈕也直接傳 PIL Image
@@ -843,14 +843,14 @@ def main() -> None:
                             data=image_to_bytes(result.image, "PNG"),
                             file_name="upscaled_output.png",
                             mime="image/png",
-                            use_container_width=True,
+                            width='stretch',
                         )
                         dl2.download_button(
                             "⬇️ 下載 JPEG（壓縮）",
                             data=image_to_bytes(result.image, "JPEG"),
                             file_name="upscaled_output.jpg",
                             mime="image/jpeg",
-                            use_container_width=True,
+                            width='stretch',
                         )
         else:
             st.info("👆 請上傳圖片後設定工作流，再點擊「執行工作流」")

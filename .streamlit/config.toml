@@ -1,0 +1,13 @@
+# .streamlit/config.toml
+
+[theme]
+# 品牌主色調 (選用柔和的藍)
+primaryColor = "#7792E3"
+# 頁面背景色 (雖然等一下會被漸層覆蓋，但建議設為柔和白)
+backgroundColor = "#F8F9FB"
+# 側邊欄與元件背景色 (淡灰色)
+secondaryBackgroundColor = "#E1E4E8"
+# 文字顏色 (深灰色，避免純黑過於刺眼)
+textColor = "#31333F"
+# 基礎字體分類設為等寬字，有利於 Consolas 的呈現
+font = "monospace"
