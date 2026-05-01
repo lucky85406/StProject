@@ -5,9 +5,20 @@ from __future__ import annotations
 import datetime
 import logging
 import sys
+import os
+import streamlit.components.v1 as components
 from typing import Any
 
 import streamlit as st
+
+import time
+from core.qr_store import (
+    create_qr_token,
+    check_qr_token,
+    consume_qr_token,
+    confirm_qr_token,
+)
+from core.qr_login import generate_qr_image, build_confirm_url
 
 from core.session_store import create_session, verify_session, delete_session
 from core.users import verify_password
@@ -26,7 +37,7 @@ logging.basicConfig(
     format=_LOG_FORMAT,
     datefmt=_LOG_DATE_FMT,
     stream=sys.stdout,
-    force=True,          # 覆蓋 Streamlit 預設 handler
+    force=True,  # 覆蓋 Streamlit 預設 handler
 )
 
 logger = logging.getLogger("app")
@@ -51,22 +62,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Session 恢復（URL query param 保留 sid）
-# ══════════════════════════════════════════════════════════════════════════════
-
-if "logged_in" not in st.session_state:
-    sid = st.query_params.get("sid", "")
-    username = verify_session(sid) if sid else None
-    if username:
-        logger.info("Session 恢復成功 ─ user=%s  sid=%s", username, sid[:8] + "…")
-        st.session_state.update(logged_in=True, username=username, sid=sid)
-    else:
-        st.session_state.update(logged_in=False, username="", sid="")
-
-if "active_page" not in st.session_state:
-    st.session_state.active_page = "home"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -544,6 +539,260 @@ p, li { color: #3b3552 !important; }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Session 恢復（URL query param 保留 sid）
+# ══════════════════════════════════════════════════════════════════════════════
+
+if "logged_in" not in st.session_state:
+    sid = st.query_params.get("sid", "")
+    username = verify_session(sid) if sid else None
+    if username:
+        logger.info("Session 恢復成功 ─ user=%s  sid=%s", username, sid[:8] + "…")
+        st.session_state.update(logged_in=True, username=username, sid=sid)
+    else:
+        st.session_state.update(logged_in=False, username="", sid="")
+
+if "active_page" not in st.session_state:
+    st.session_state.active_page = "home"
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  QR Code 確認路由（手機掃描後進入此頁）
+# ══════════════════════════════════════════════════════════════════════════════
+_qr_confirm_token: str = st.query_params.get("qr_confirm", "")
+
+if _qr_confirm_token and not st.session_state.get("logged_in"):
+    from core.qr_store import confirm_qr_token, check_qr_token
+
+    st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
+
+    # ── 手機確認頁 CSS（獨立變數，開頭不留空行）────────────────────
+    _QR_MOBILE_CSS: str = (
+        "<style>"
+        "#MainMenu,footer,header,[data-testid='stToolbar']{display:none!important}"
+        ".qr-card{background:#fff;border:1px solid rgba(124,111,247,.20);"
+        "border-radius:20px;padding:2.5rem 2rem;max-width:360px;width:90vw;"
+        "box-shadow:0 8px 40px rgba(124,111,247,.14);text-align:center;margin:auto}"
+        ".qr-icon{font-size:3.5rem;display:block;margin-bottom:.8rem}"
+        ".qr-title{font-size:1.4rem;font-weight:800;"
+        "background:linear-gradient(135deg,#7c6ff7,#e879a0);"
+        "-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.4rem}"
+        ".qr-sub{font-size:.82rem;color:#8b85a8;margin-bottom:1.8rem}"
+        ".qr-countdown-wrap{display:flex;flex-direction:column;"
+        "align-items:center;gap:.8rem;margin:1.5rem 0}"
+        ".qr-countdown-circle{width:72px;height:72px;border-radius:50%;"
+        "background:linear-gradient(135deg,#7c6ff7,#e879a0);"
+        "display:flex;align-items:center;justify-content:center;"
+        "font-size:1.8rem;font-weight:800;color:#fff;"
+        "box-shadow:0 4px 20px rgba(124,111,247,.35);"
+        "animation:pulse 1s ease-in-out infinite}"
+        "@keyframes pulse{"
+        "0%,100%{transform:scale(1);box-shadow:0 4px 20px rgba(124,111,247,.35)}"
+        "50%{transform:scale(1.06);box-shadow:0 6px 28px rgba(124,111,247,.50)}}"
+        ".qr-countdown-label{font-size:.82rem;color:#5c5580;font-weight:600}"
+        ".qr-close-hint{font-size:.75rem;color:#b8b2d0;margin-top:1rem;"
+        "padding:8px 14px;background:rgba(124,111,247,.06);"
+        "border-radius:8px;display:none}"
+        ".qr-close-hint.show{display:block}"
+        ".qr-check{width:72px;height:72px;border-radius:50%;"
+        "background:linear-gradient(135deg,#10b981,#059669);"
+        "display:flex;align-items:center;justify-content:center;"
+        "font-size:2rem;color:#fff;margin:1rem auto;"
+        "box-shadow:0 4px 20px rgba(16,185,129,.35);"
+        "animation:pop .4s cubic-bezier(.175,.885,.32,1.275)}"
+        "@keyframes pop{from{transform:scale(0);opacity:0}to{transform:scale(1);opacity:1}}"
+        "</style>"
+    )
+    st.markdown(_QR_MOBILE_CSS, unsafe_allow_html=True)
+
+    # ── Token 有效性檢查 ──────────────────────────────────────────
+    token_status, _ = check_qr_token(_qr_confirm_token)
+
+    if token_status == "expired":
+        _, _c, _ = st.columns([1, 2, 1])
+        with _c:
+            st.error("❌ 此 QR Code 已過期，請回到電腦端重新掃描。")
+        st.stop()
+
+    # ── 狀態初始化 ────────────────────────────────────────────────
+    if "qr_mobile_confirmed" not in st.session_state:
+        st.session_state.qr_mobile_confirmed = False
+
+    # ── 未確認：顯示帳號選擇 + 確認按鈕 ─────────────────────────
+    if not st.session_state.qr_mobile_confirmed:
+        _, _c, _ = st.columns([0.5, 2, 0.5])
+        with _c:
+            # HTML 緊貼左邊界，不留縮排
+            st.markdown(
+                '<div class="qr-card">'
+                '<span class="qr-icon">📱</span>'
+                '<div class="qr-title">QR Code 登入確認</div>'
+                '<div class="qr-sub">請確認是由您本人操作，再選擇帳號完成授權</div>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            _qr_username: str = st.selectbox(
+                "選擇登入帳號",
+                ["admin", "user"],
+                key="qr_mobile_username",
+            )
+            if st.button(
+                "✅ 確認登入此帳號",
+                use_container_width=True,
+                type="primary",
+                key="qr_mobile_confirm_btn",
+            ):
+                if confirm_qr_token(_qr_confirm_token, _qr_username):
+                    st.session_state.qr_mobile_confirmed = True
+                    st.session_state.qr_mobile_user = _qr_username
+                    logger.info(
+                        "QR Token 手機端確認 ─ user=%s  token=%s",
+                        _qr_username,
+                        _qr_confirm_token[:8] + "…",
+                    )
+                    st.rerun()
+                else:
+                    st.error("❌ Token 無效或已過期，請重新掃描 QR Code。")
+
+    # ── 已確認：成功畫面 + 倒數關閉（components.html 確保 JS 執行）──
+    else:
+        _confirmed_user: str = st.session_state.get("qr_mobile_user", "使用者")
+
+        # 先清除 state，防止 Streamlit WebSocket 心跳觸發 rerun 導致畫面跳回
+        st.session_state.pop("qr_mobile_confirmed", None)
+        st.session_state.pop("qr_mobile_user", None)
+
+        # components.html 建立獨立 iframe，JS 100% 執行，不受 React 限制
+        components.html(
+            f"""
+            <!DOCTYPE html>
+            <html lang="zh-Hant">
+            <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>
+            *{{margin:0;padding:0;box-sizing:border-box}}
+            body{{
+                font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+                background:linear-gradient(145deg,#f0f4ff 0%,#faf5ff 50%,#fff0f9 100%);
+                min-height:100vh;
+                display:flex;align-items:center;justify-content:center;
+            }}
+            .card{{
+                background:#fff;
+                border:1px solid rgba(124,111,247,.20);
+                border-radius:20px;
+                padding:2.5rem 2rem;
+                max-width:340px;width:90vw;
+                box-shadow:0 8px 40px rgba(124,111,247,.14);
+                text-align:center;
+            }}
+            .check{{
+                width:72px;height:72px;border-radius:50%;
+                background:linear-gradient(135deg,#10b981,#059669);
+                display:flex;align-items:center;justify-content:center;
+                font-size:2rem;color:#fff;margin:0 auto 1rem;
+                box-shadow:0 4px 20px rgba(16,185,129,.35);
+                animation:pop .4s cubic-bezier(.175,.885,.32,1.275);
+            }}
+            @keyframes pop{{
+                from{{transform:scale(0);opacity:0}}
+                to{{transform:scale(1);opacity:1}}
+            }}
+            .title{{
+                font-size:1.3rem;font-weight:800;
+                background:linear-gradient(135deg,#7c6ff7,#e879a0);
+                -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+                margin-bottom:.4rem;
+            }}
+            .sub{{font-size:.85rem;color:#8b85a8;margin-bottom:1.5rem;line-height:1.6}}
+            .sub strong{{color:#5c5580}}
+            .circle{{
+                width:64px;height:64px;border-radius:50%;
+                background:linear-gradient(135deg,#7c6ff7,#e879a0);
+                display:flex;align-items:center;justify-content:center;
+                font-size:1.6rem;font-weight:800;color:#fff;
+                margin:0 auto .6rem;
+                box-shadow:0 4px 20px rgba(124,111,247,.35);
+                animation:pulse 1s ease-in-out infinite;
+            }}
+            @keyframes pulse{{
+                0%,100%{{transform:scale(1)}}
+                50%{{transform:scale(1.08)}}
+            }}
+            .label{{font-size:.82rem;color:#5c5580;font-weight:600}}
+            .hint{{
+                display:none;margin-top:1rem;
+                font-size:.78rem;color:#b8b2d0;
+                background:rgba(124,111,247,.06);
+                border-radius:8px;padding:8px 14px;
+                line-height:1.5;
+            }}
+            .hint.show{{display:block}}
+            </style>
+            </head>
+            <body>
+            <div class="card">
+                <div class="check">✓</div>
+                <div class="title">授權成功！</div>
+                <div class="sub">
+                    帳號 <strong>{_confirmed_user}</strong> 已完成驗證<br>
+                    電腦端將自動登入
+                </div>
+                <div class="circle" id="num">3</div>
+                <div class="label">秒後自動關閉此頁面</div>
+                <div class="hint" id="hint">
+                    🔒 請手動關閉此分頁
+                </div>
+            </div>
+
+            <script>
+            (function() {{
+                var count = 3;
+                var numEl  = document.getElementById('num');
+                var hintEl = document.getElementById('hint');
+
+                var timer = setInterval(function() {{
+                    count--;
+                    if (numEl) numEl.textContent = count;
+
+                    if (count <= 0) {{
+                        clearInterval(timer);
+
+                        // iOS 唯一有效方案：導向空白頁（穿透到外層瀏覽器分頁）
+                        try {{
+                            // window.top = 最外層瀏覽器分頁（穿透 Streamlit 的 iframe）
+                            window.top.location.replace('about:blank');
+                        }} catch(e1) {{
+                            // 備援 1：嘗試 window.parent
+                            try {{
+                                window.parent.location.replace('about:blank');
+                            }} catch(e2) {{
+                                // 備援 2：關閉自身 iframe（視覺效果）
+                                try {{
+                                    window.location.replace('about:blank');
+                                }} catch(e3) {{}}
+                                // 顯示手動提示
+                                if (hintEl) hintEl.classList.add('show');
+                                if (numEl) {{
+                                    numEl.textContent = '✓';
+                                    numEl.style.animation = 'none';
+                                }}
+                            }}
+                        }}
+                    }}
+                }}, 1000);
+            }})();
+            </script>
+            </body>
+            </html>
+            """,
+            height=360,
+            scrolling=False,
+        )
+
+        st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  登入畫面
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -613,7 +862,6 @@ def show_login() -> None:
     st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
     st.markdown(LOGIN_CSS, unsafe_allow_html=True)
 
-    # 讓登入卡片置中
     _, col, _ = st.columns([1, 1.4, 1])
     with col:
         st.markdown(
@@ -627,28 +875,160 @@ def show_login() -> None:
             unsafe_allow_html=True,
         )
 
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("👤  帳號", placeholder="請輸入帳號")
-            password = st.text_input("🔒  密碼", type="password", placeholder="請輸入密碼")
-            submit = st.form_submit_button("登 入", use_container_width=True)
+        tab_pw, tab_qr = st.tabs(["🔐 帳號密碼", "📱 QR Code 掃描登入"])
 
-        if submit:
-            logger.info("登入嘗試 ─ user=%s", username)
-            if verify_password(username, password):
-                sid = create_session(username)
-                st.session_state.update(logged_in=True, username=username, sid=sid)
-                st.query_params["sid"] = sid
-                logger.info("登入成功 ─ user=%s  sid=%s", username, sid[:8] + "…")
-                log_section("MAIN APPLICATION LOADED")
-                st.rerun()
-            else:
-                logger.warning("登入失敗 ─ user=%s  (密碼錯誤)", username)
-                st.error("帳號或密碼錯誤，請重試。")
+        # ── Tab 1：原有帳密登入（不動）────────────────────────────
+        with tab_pw:
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("👤  帳號", placeholder="請輸入帳號")
+                password = st.text_input(
+                    "🔒  密碼", type="password", placeholder="請輸入密碼"
+                )
+                submit = st.form_submit_button("登 入", use_container_width=True)
 
+            if submit:
+                logger.info("登入嘗試 ─ user=%s", username)
+                if verify_password(username, password):
+                    sid = create_session(username)
+                    st.session_state.update(logged_in=True, username=username, sid=sid)
+                    st.query_params["sid"] = sid
+                    logger.info("登入成功 ─ user=%s  sid=%s", username, sid[:8] + "…")
+                    log_section("MAIN APPLICATION LOADED")
+                    st.rerun()
+                else:
+                    logger.warning("登入失敗 ─ user=%s", username)
+                    st.error("帳號或密碼錯誤，請重試。")
+
+            st.markdown(
+                "<div class='login-hint'>測試帳號：admin / admin123 　或　 user / user123</div>",
+                unsafe_allow_html=True,
+            )
+
+        # ── Tab 2：QR Code 登入 ──────────────────────────────────
+        with tab_qr:
+            _show_qr_login_tab()
+
+
+def _show_qr_login_tab() -> None:
+    """
+    QR Code 登入 Tab。
+    Fragment 只負責輪詢與寫入登入結果，
+    外層偵測 flag 後用 scope='app' 強制整頁 rerun。
+    """
+
+    # ── Token 初始化 ─────────────────────────────────────────────
+    if "qr_token_id" not in st.session_state or not st.session_state.qr_token_id:
+        st.session_state.qr_token_id = create_qr_token()
+
+    # ── ✅ 外層先檢查登入 flag（Fragment rerun 後會回到這裡）────
+    if st.session_state.get("qr_login_success"):
+        # 清除 flag，執行真正的整頁跳轉
+        st.session_state.pop("qr_login_success", None)
+        st.session_state.pop("qr_token_id", None)
+        logger.info(
+            "QR 登入完成，整頁跳轉 ─ user=%s",
+            st.session_state.get("username"),
+        )
+        # scope="app" = 強制整頁 rerun，等同於使用者手動重新整理
+        st.rerun(scope="app")
+
+    # ── Fragment：只重跑此區塊，不凍結整頁 UI ───────────────────
+    @st.fragment(run_every=3)
+    def _qr_polling_block() -> None:
+        token_id: str = st.session_state.get("qr_token_id", "")
+        if not token_id:
+            return
+
+        status, confirmed_user = check_qr_token(token_id)
+
+        # Token 過期 → 重新產生
+        if status == "expired":
+            st.session_state.qr_token_id = create_qr_token()
+            st.warning("⏰ QR Code 已過期，正在重新產生…")
+            st.rerun()  # Fragment 層級即可
+            return
+
+        # ✅ 確認成功 → 寫入 session_state，設定 flag
+        if status == "confirmed" and confirmed_user:
+            consume_qr_token(token_id)
+            sid = create_session(confirmed_user)
+
+            # 一次性寫入所有登入狀態
+            st.session_state.update(
+                logged_in=True,
+                username=confirmed_user,
+                sid=sid,
+                qr_token_id=None,
+                qr_login_success=True,  # ← 外層偵測用的 flag
+            )
+            st.query_params["sid"] = sid
+            logger.info(
+                "QR Token 確認完成，寫入 session ─ user=%s  sid=%s",
+                confirmed_user,
+                sid[:8] + "…",
+            )
+
+            # Fragment 層級 rerun，讓外層函式重跑並偵測到 flag
+            st.rerun()
+            return
+
+        # ── QR Code 顯示區 ───────────────────────────────────────
+        from core.qr_login import generate_qr_image, build_confirm_url
+        from core.network import get_local_ip
+
+        confirm_url = build_confirm_url(token_id, port=8501)
+        qr_bytes = generate_qr_image(confirm_url)
+        local_ip = get_local_ip()
+
+        # 內網 IP 提示
         st.markdown(
-            "<div class='login-hint'>測試帳號：admin / admin123 　或　 user / user123</div>",
+            f"""
+            <div style='text-align:center;background:rgba(124,111,247,0.08);
+                        border:1px solid rgba(124,111,247,0.2);border-radius:8px;
+                        padding:6px 12px;margin-bottom:8px;font-size:0.75rem;
+                        color:#5c5580;font-family:"DM Mono",monospace'>
+                🌐 內網服務位址：<strong>{local_ip}:8501</strong>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
+
+        # QR Code 圖片置中
+        _, img_col, _ = st.columns([1, 1, 1])
+        with img_col:
+            st.image(qr_bytes, width=200)
+
+        # 完整連結文字
+        st.markdown(
+            f"<div style='text-align:center;font-size:0.72rem;color:#8b85a8;"
+            f"word-break:break-all;margin-top:0.3rem'>{confirm_url}</div>",
+            unsafe_allow_html=True,
+        )
+
+        # 狀態指示
+        _render_status_indicator(status)
+
+    # 呼叫 fragment（每次外層執行都會重新掛載）
+    _qr_polling_block()
+
+
+def _render_status_indicator(status: str) -> None:
+    """根據狀態顯示對應提示"""
+    status_map: dict[str, tuple[str, str]] = {
+        "pending": ("⏳", "等待掃描中… (每 3 秒自動偵測)", "#8b85a8"),
+        "confirmed": ("✅", "掃描成功！正在登入…", "#10b981"),
+        "expired": ("❌", "已過期，請重新整理", "#ef4444"),
+    }
+    icon, msg, color = status_map.get(status, ("❓", "未知狀態", "#8b85a8"))
+    st.markdown(
+        f"""
+        <p style='text-align:center;color:{color};
+                  font-size:0.82rem;margin-top:0.8rem'>
+            {icon} {msg}
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -663,7 +1043,7 @@ PAGE_CONFIG: list[dict[str, Any]] = [
         "title": "系統首頁",
         "subtitle": "歡迎使用 StProject 管理平台",
         "module": "pages.home",
-        "params": [],          # 首頁無側邊欄參數
+        "params": [],  # 首頁無側邊欄參數
     },
     {
         "id": "dashboard",
@@ -673,11 +1053,26 @@ PAGE_CONFIG: list[dict[str, Any]] = [
         "subtitle": "圖表分析與關鍵指標總覽",
         "module": "pages.dashboard",
         "params": [
-            {"type": "selectbox", "key": "dash_range", "label": "時間範圍",
-             "options": ["最近 7 天", "最近 30 天", "最近 90 天", "本年度"], "default": 0},
-            {"type": "selectbox", "key": "dash_chart", "label": "圖表類型",
-             "options": ["折線圖", "長條圖", "面積圖"], "default": 0},
-            {"type": "checkbox", "key": "dash_animate", "label": "啟用動態效果", "default": True},
+            {
+                "type": "selectbox",
+                "key": "dash_range",
+                "label": "時間範圍",
+                "options": ["最近 7 天", "最近 30 天", "最近 90 天", "本年度"],
+                "default": 0,
+            },
+            {
+                "type": "selectbox",
+                "key": "dash_chart",
+                "label": "圖表類型",
+                "options": ["折線圖", "長條圖", "面積圖"],
+                "default": 0,
+            },
+            {
+                "type": "checkbox",
+                "key": "dash_animate",
+                "label": "啟用動態效果",
+                "default": True,
+            },
         ],
     },
     {
@@ -688,15 +1083,45 @@ PAGE_CONFIG: list[dict[str, Any]] = [
         "subtitle": "資料搜集、彙整分析與二階段 Pipeline",
         "module": "pages.crawler_dashboard",
         "params": [
-            {"type": "number", "key": "crawl_concurrency", "label": "最大並發數",
-             "min": 1, "max": 10, "default": 3},
-            {"type": "slider", "key": "crawl_delay", "label": "請求延遲 (秒)",
-             "min": 0.5, "max": 5.0, "step": 0.5, "default": 1.5},
-            {"type": "number", "key": "crawl_timeout", "label": "逾時時間 (秒)",
-             "min": 5, "max": 60, "default": 15},
-            {"type": "number", "key": "crawl_retries", "label": "最大重試次數",
-             "min": 0, "max": 10, "default": 3},
-            {"type": "checkbox", "key": "crawl_robots", "label": "遵守 robots.txt", "default": True},
+            {
+                "type": "number",
+                "key": "crawl_concurrency",
+                "label": "最大並發數",
+                "min": 1,
+                "max": 10,
+                "default": 3,
+            },
+            {
+                "type": "slider",
+                "key": "crawl_delay",
+                "label": "請求延遲 (秒)",
+                "min": 0.5,
+                "max": 5.0,
+                "step": 0.5,
+                "default": 1.5,
+            },
+            {
+                "type": "number",
+                "key": "crawl_timeout",
+                "label": "逾時時間 (秒)",
+                "min": 5,
+                "max": 60,
+                "default": 15,
+            },
+            {
+                "type": "number",
+                "key": "crawl_retries",
+                "label": "最大重試次數",
+                "min": 0,
+                "max": 10,
+                "default": 3,
+            },
+            {
+                "type": "checkbox",
+                "key": "crawl_robots",
+                "label": "遵守 robots.txt",
+                "default": True,
+            },
         ],
     },
     {
@@ -707,14 +1132,41 @@ PAGE_CONFIG: list[dict[str, Any]] = [
         "subtitle": "GPU 加速 · PyTorch EDSR · 人像細節強化",
         "module": "pages.image_upscaler",
         "params": [
-            {"type": "selectbox", "key": "up_model", "label": "AI 模型",
-             "options": ["EDSR", "ESPCN", "FSRCNN", "LapSRN"], "default": 0},
-            {"type": "selectbox", "key": "up_scale", "label": "放大倍數",
-             "options": ["2×", "3×", "4×"], "default": 0},
-            {"type": "checkbox", "key": "up_gpu", "label": "啟用 GPU 加速", "default": True},
-            {"type": "checkbox", "key": "up_portrait", "label": "人像細節強化模式", "default": False},
-            {"type": "slider", "key": "up_sharpen", "label": "銳化強度",
-             "min": 0.0, "max": 3.0, "step": 0.1, "default": 1.2},
+            {
+                "type": "selectbox",
+                "key": "up_model",
+                "label": "AI 模型",
+                "options": ["EDSR", "ESPCN", "FSRCNN", "LapSRN"],
+                "default": 0,
+            },
+            {
+                "type": "selectbox",
+                "key": "up_scale",
+                "label": "放大倍數",
+                "options": ["2×", "3×", "4×"],
+                "default": 0,
+            },
+            {
+                "type": "checkbox",
+                "key": "up_gpu",
+                "label": "啟用 GPU 加速",
+                "default": True,
+            },
+            {
+                "type": "checkbox",
+                "key": "up_portrait",
+                "label": "人像細節強化模式",
+                "default": False,
+            },
+            {
+                "type": "slider",
+                "key": "up_sharpen",
+                "label": "銳化強度",
+                "min": 0.0,
+                "max": 3.0,
+                "step": 0.1,
+                "default": 1.2,
+            },
         ],
     },
     {
@@ -746,9 +1198,6 @@ _NAV_BTN_TMPL = """
 """
 
 
-
-
-
 def _clear_other_page_params(current_page_id: str) -> None:
     """
     切換頁面時，把其他頁面的 params key 從 session_state 清除。
@@ -756,12 +1205,14 @@ def _clear_other_page_params(current_page_id: str) -> None:
     """
     current_keys: set[str] = {
         p["key"]
-        for cfg in PAGE_CONFIG if cfg["id"] == current_page_id
+        for cfg in PAGE_CONFIG
+        if cfg["id"] == current_page_id
         for p in cfg.get("params", [])
     }
     other_keys: list[str] = [
         p["key"]
-        for cfg in PAGE_CONFIG if cfg["id"] != current_page_id
+        for cfg in PAGE_CONFIG
+        if cfg["id"] != current_page_id
         for p in cfg.get("params", [])
         if p["key"] not in current_keys  # 不同頁若剛好同名 key 則保留
     ]
@@ -776,7 +1227,7 @@ def _render_params(page_cfg: dict) -> None:
     if not params:
         st.markdown(
             "<p style='font-size:0.72rem;color:#8b85a8;"
-            "font-family:\"DM Mono\",monospace;padding:0 4px'>"
+            'font-family:"DM Mono",monospace;padding:0 4px\'>'
             "此頁面無額外參數</p>",
             unsafe_allow_html=True,
         )
@@ -784,7 +1235,7 @@ def _render_params(page_cfg: dict) -> None:
 
     for p in params:
         ptype: str = p["type"]
-        key: str   = p["key"]
+        key: str = p["key"]
         label: str = p["label"]
 
         if ptype == "selectbox":
@@ -820,8 +1271,9 @@ def _render_params(page_cfg: dict) -> None:
                 safe_val = default_f
             if key in st.session_state and not isinstance(st.session_state[key], float):
                 del st.session_state[key]
-            st.slider(label, min_value=lo, max_value=hi,
-                      step=step, value=safe_val, key=key)
+            st.slider(
+                label, min_value=lo, max_value=hi, step=step, value=safe_val, key=key
+            )
 
         elif ptype == "number":
             lo_i, hi_i = int(p["min"]), int(p["max"])
@@ -834,8 +1286,9 @@ def _render_params(page_cfg: dict) -> None:
                 safe_val = default_i
             if key in st.session_state and not isinstance(st.session_state[key], int):
                 del st.session_state[key]
-            st.number_input(label, min_value=lo_i, max_value=hi_i,
-                            value=safe_val, step=1, key=key)
+            st.number_input(
+                label, min_value=lo_i, max_value=hi_i, value=safe_val, step=1, key=key
+            )
 
 
 def render_sidebar(active_id: str) -> str:
@@ -872,7 +1325,9 @@ def render_sidebar(active_id: str) -> str:
         )
 
         # ── 登出按鈕（下一列，secondary type，CSS 精確定位）─────────
-        if logout_clicked := st.button("🚪  登出", key="logout_btn", use_container_width=True):
+        if logout_clicked := st.button(
+            "🚪  登出", key="logout_btn", use_container_width=True
+        ):
             logger.info("使用者登出 ─ user=%s", st.session_state.get("username"))
             delete_session(st.session_state.sid)
             st.session_state.update(logged_in=False, username="", sid="")
@@ -882,7 +1337,7 @@ def render_sidebar(active_id: str) -> str:
 
         # ── 導覽按鈕（上半部）─────────────────────────────────────
         st.markdown(
-            "<p style='font-size:0.58rem;font-family:\"JetBrains Mono\",monospace;"
+            '<p style=\'font-size:0.58rem;font-family:"JetBrains Mono",monospace;'
             "color:#8890a4;text-transform:uppercase;letter-spacing:0.12em;"
             "padding:0 4px;margin:0.6rem 0 0.5rem'>▪ 功能導覽</p>",
             unsafe_allow_html=True,
@@ -890,7 +1345,7 @@ def render_sidebar(active_id: str) -> str:
 
         # 每列最多 3 個按鈕，以 st.columns 實現
         for row_start in range(0, len(PAGE_CONFIG), 3):
-            row_pages = PAGE_CONFIG[row_start: row_start + 3]
+            row_pages = PAGE_CONFIG[row_start : row_start + 3]
             cols = st.columns(len(row_pages))
             for col, page in zip(cols, row_pages):
                 with col:
@@ -904,7 +1359,8 @@ def render_sidebar(active_id: str) -> str:
                         new_page = page["id"]
                         logger.info(
                             "導覽切換 ─ %s → %s  (user=%s)",
-                            active_id, page["id"],
+                            active_id,
+                            page["id"],
                             st.session_state.get("username"),
                         )
 
@@ -929,6 +1385,7 @@ def render_sidebar(active_id: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  頁面標題橫幅 + Footer
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def render_page_hero(page_cfg: dict) -> None:
     """渲染頁面最上方的標題橫幅"""
@@ -974,7 +1431,6 @@ def _inject_active_nav_style(active_id: str) -> None:
     )
 
 
-
 def render_footer() -> None:
     """渲染畫面底部固定 Footer"""
     today = datetime.date.today().strftime("%Y-%m-%d")
@@ -1002,6 +1458,7 @@ def render_footer() -> None:
 #  主畫面路由
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def show_main() -> None:
     # 注入全域 CSS
     st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
@@ -1027,7 +1484,8 @@ def show_main() -> None:
     log_section(f"PAGE: {page_cfg['title'].upper()}")
     logger.info(
         "進入功能頁面 ─ id=%s  title=%s  user=%s",
-        active_id, page_cfg["title"],
+        active_id,
+        page_cfg["title"],
         st.session_state.get("username"),
     )
 
@@ -1035,6 +1493,7 @@ def show_main() -> None:
     module_path = page_cfg["module"]
     try:
         import importlib
+
         mod = importlib.import_module(module_path)
         if hasattr(mod, "show"):
             mod.show()

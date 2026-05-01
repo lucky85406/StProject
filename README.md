@@ -41,7 +41,7 @@ uv run playwright install chromium
 ### 3. 啟動應用
 
 ```bash
-uv run streamlit run app.py
+uv run streamlit run app.py --server.address=0.0.0.0 --server.port=8501
 ```
 
 ## 功能說明
