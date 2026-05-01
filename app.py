@@ -6,7 +6,7 @@ import datetime
 import logging
 import sys
 import os
-import streamlit.components.v1 as components
+import warnings
 from typing import Any
 
 import streamlit as st
@@ -652,142 +652,109 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
                 else:
                     st.error("❌ Token 無效或已過期，請重新掃描 QR Code。")
 
-    # ── 已確認：成功畫面 + 倒數關閉（components.html 確保 JS 執行）──
+    # ── 已確認：成功畫面 + 倒數關閉 ──────────────────────────────────
     else:
         _confirmed_user: str = st.session_state.get("qr_mobile_user", "使用者")
 
-        # 先清除 state，防止 Streamlit WebSocket 心跳觸發 rerun 導致畫面跳回
         st.session_state.pop("qr_mobile_confirmed", None)
         st.session_state.pop("qr_mobile_user", None)
 
-        # components.html 建立獨立 iframe，JS 100% 執行，不受 React 限制
-        components.html(
-            f"""
-            <!DOCTYPE html>
-            <html lang="zh-Hant">
-            <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <style>
-            *{{margin:0;padding:0;box-sizing:border-box}}
-            body{{
-                font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-                background:linear-gradient(145deg,#f0f4ff 0%,#faf5ff 50%,#fff0f9 100%);
-                min-height:100vh;
-                display:flex;align-items:center;justify-content:center;
-            }}
-            .card{{
-                background:#fff;
-                border:1px solid rgba(124,111,247,.20);
-                border-radius:20px;
-                padding:2.5rem 2rem;
-                max-width:340px;width:90vw;
-                box-shadow:0 8px 40px rgba(124,111,247,.14);
-                text-align:center;
-            }}
-            .check{{
-                width:72px;height:72px;border-radius:50%;
-                background:linear-gradient(135deg,#10b981,#059669);
-                display:flex;align-items:center;justify-content:center;
-                font-size:2rem;color:#fff;margin:0 auto 1rem;
-                box-shadow:0 4px 20px rgba(16,185,129,.35);
-                animation:pop .4s cubic-bezier(.175,.885,.32,1.275);
-            }}
-            @keyframes pop{{
-                from{{transform:scale(0);opacity:0}}
-                to{{transform:scale(1);opacity:1}}
-            }}
-            .title{{
-                font-size:1.3rem;font-weight:800;
-                background:linear-gradient(135deg,#7c6ff7,#e879a0);
-                -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-                margin-bottom:.4rem;
-            }}
-            .sub{{font-size:.85rem;color:#8b85a8;margin-bottom:1.5rem;line-height:1.6}}
-            .sub strong{{color:#5c5580}}
-            .circle{{
-                width:64px;height:64px;border-radius:50%;
-                background:linear-gradient(135deg,#7c6ff7,#e879a0);
-                display:flex;align-items:center;justify-content:center;
-                font-size:1.6rem;font-weight:800;color:#fff;
-                margin:0 auto .6rem;
-                box-shadow:0 4px 20px rgba(124,111,247,.35);
-                animation:pulse 1s ease-in-out infinite;
-            }}
-            @keyframes pulse{{
-                0%,100%{{transform:scale(1)}}
-                50%{{transform:scale(1.08)}}
-            }}
-            .label{{font-size:.82rem;color:#5c5580;font-weight:600}}
-            .hint{{
-                display:none;margin-top:1rem;
-                font-size:.78rem;color:#b8b2d0;
-                background:rgba(124,111,247,.06);
-                border-radius:8px;padding:8px 14px;
-                line-height:1.5;
-            }}
-            .hint.show{{display:block}}
-            </style>
-            </head>
-            <body>
-            <div class="card">
-                <div class="check">✓</div>
-                <div class="title">授權成功！</div>
-                <div class="sub">
-                    帳號 <strong>{_confirmed_user}</strong> 已完成驗證<br>
-                    電腦端將自動登入
-                </div>
-                <div class="circle" id="num">3</div>
-                <div class="label">秒後自動關閉此頁面</div>
-                <div class="hint" id="hint">
-                    🔒 請手動關閉此分頁
-                </div>
-            </div>
-
-            <script>
-            (function() {{
-                var count = 3;
-                var numEl  = document.getElementById('num');
-                var hintEl = document.getElementById('hint');
-
-                var timer = setInterval(function() {{
-                    count--;
-                    if (numEl) numEl.textContent = count;
-
-                    if (count <= 0) {{
-                        clearInterval(timer);
-
-                        // iOS 唯一有效方案：導向空白頁（穿透到外層瀏覽器分頁）
-                        try {{
-                            // window.top = 最外層瀏覽器分頁（穿透 Streamlit 的 iframe）
-                            window.top.location.replace('about:blank');
-                        }} catch(e1) {{
-                            // 備援 1：嘗試 window.parent
-                            try {{
-                                window.parent.location.replace('about:blank');
-                            }} catch(e2) {{
-                                // 備援 2：關閉自身 iframe（視覺效果）
-                                try {{
-                                    window.location.replace('about:blank');
-                                }} catch(e3) {{}}
-                                // 顯示手動提示
-                                if (hintEl) hintEl.classList.add('show');
-                                if (numEl) {{
-                                    numEl.textContent = '✓';
-                                    numEl.style.animation = 'none';
-                                }}
-                            }}
-                        }}
+        _success_html: str = f"""<!DOCTYPE html>
+    <html lang="zh-Hant">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+    *{{margin:0;padding:0;box-sizing:border-box}}
+    body{{
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+        background:linear-gradient(145deg,#f0f4ff 0%,#faf5ff 50%,#fff0f9 100%);
+        min-height:100vh;
+        display:flex;align-items:center;justify-content:center;
+    }}
+    .card{{
+        background:#fff;border:1px solid rgba(124,111,247,.20);
+        border-radius:20px;padding:2.5rem 2rem;
+        max-width:340px;width:90vw;
+        box-shadow:0 8px 40px rgba(124,111,247,.14);text-align:center;
+    }}
+    .check{{
+        width:72px;height:72px;border-radius:50%;
+        background:linear-gradient(135deg,#10b981,#059669);
+        display:flex;align-items:center;justify-content:center;
+        font-size:2rem;color:#fff;margin:0 auto 1rem;
+        box-shadow:0 4px 20px rgba(16,185,129,.35);
+        animation:pop .4s cubic-bezier(.175,.885,.32,1.275);
+    }}
+    @keyframes pop{{from{{transform:scale(0);opacity:0}}to{{transform:scale(1);opacity:1}}}}
+    .title{{
+        font-size:1.3rem;font-weight:800;
+        background:linear-gradient(135deg,#7c6ff7,#e879a0);
+        -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+        margin-bottom:.4rem;
+    }}
+    .sub{{font-size:.85rem;color:#8b85a8;margin-bottom:1.5rem;line-height:1.6}}
+    .sub strong{{color:#5c5580}}
+    .circle{{
+        width:64px;height:64px;border-radius:50%;
+        background:linear-gradient(135deg,#7c6ff7,#e879a0);
+        display:flex;align-items:center;justify-content:center;
+        font-size:1.6rem;font-weight:800;color:#fff;
+        margin:0 auto .6rem;
+        box-shadow:0 4px 20px rgba(124,111,247,.35);
+        animation:pulse 1s ease-in-out infinite;
+    }}
+    @keyframes pulse{{0%,100%{{transform:scale(1)}}50%{{transform:scale(1.08)}}}}
+    .label{{font-size:.82rem;color:#5c5580;font-weight:600;margin-bottom:1rem}}
+    .hint{{
+        font-size:.82rem;color:#7c6ff7;font-weight:600;
+        background:rgba(124,111,247,.08);border:1px solid rgba(124,111,247,.20);
+        border-radius:10px;padding:10px 16px;margin-top:.5rem;line-height:1.6;
+    }}
+    </style>
+    </head>
+    <body>
+    <div class="card">
+        <div class="check">✓</div>
+        <div class="title">授權成功！</div>
+        <div class="sub">帳號 <strong>{_confirmed_user}</strong> 已完成驗證<br>電腦端將自動登入</div>
+        <div class="circle" id="num">3</div>
+        <div class="label">秒後自動關閉此頁面</div>
+        <div class="hint" id="hint">✋ 請手動關閉此分頁</div>
+    </div>
+    <script>
+    (function(){{
+        var count=3;
+        var numEl=document.getElementById('num');
+        var hintEl=document.getElementById('hint');
+        hintEl.style.display='none';
+        var timer=setInterval(function(){{
+            count--;
+            if(numEl)numEl.textContent=count;
+            if(count<=0){{
+                clearInterval(timer);
+                try{{window.top.location.replace('about:blank');}}catch(e1){{
+                    try{{window.parent.location.replace('about:blank');}}catch(e2){{
+                        try{{window.location.replace('about:blank');}}catch(e3){{}}
+                        hintEl.style.display='block';
+                        if(numEl){{numEl.textContent='✓';numEl.style.animation='none';}}
                     }}
-                }}, 1000);
-            }})();
-            </script>
-            </body>
-            </html>
-            """,
-            height=360,
-            scrolling=False,
-        )
+                }}
+            }}
+        }},1000);
+    }})();
+    </script>
+    </body>
+    </html>"""
+
+        # DeprecationWarning 暫時壓制：
+        # st.iframe 目前不支援 srcdoc（inline HTML），
+        # components.v1.html 實際移除日為 2026-06-01，暫時保留使用。
+        import streamlit.components.v1 as components
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            components.html(_success_html, height=360, scrolling=False)
 
         st.stop()
 
