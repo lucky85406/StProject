@@ -629,10 +629,23 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
                 "</div>",
                 unsafe_allow_html=True,
             )
-            _qr_username: str = st.selectbox(
-                "選擇登入帳號",
-                ["admin", "user"],
+            # ── Step 2：輸入帳號、密碼、TOTP ────────────────────
+            _qr_username: str = st.text_input(
+                "輸入登入帳號",
+                placeholder="請輸入您的帳號",
                 key="qr_mobile_username",
+            )
+            _qr_password: str = st.text_input(
+                "輸入密碼",
+                type="password",
+                placeholder="請輸入密碼",
+                key="qr_mobile_password",
+            )
+            _qr_totp: str = st.text_input(
+                "Google 驗證碼（6 位數）",
+                placeholder="開啟 Google Authenticator 取得",
+                max_chars=6,
+                key="qr_mobile_totp",
             )
             if st.button(
                 "✅ 確認登入此帳號",
@@ -640,17 +653,45 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
                 type="primary",
                 key="qr_mobile_confirm_btn",
             ):
-                if confirm_qr_token(_qr_confirm_token, _qr_username):
-                    st.session_state.qr_mobile_confirmed = True
-                    st.session_state.qr_mobile_user = _qr_username
-                    logger.info(
-                        "QR Token 手機端確認 ─ user=%s  token=%s",
-                        _qr_username,
-                        _qr_confirm_token[:8] + "…",
-                    )
-                    st.rerun()
+                from core.users import user_exists, verify_login
+
+                _uname = _qr_username.strip()
+
+                if not _uname:
+                    st.error("❌ 請輸入帳號後再確認。")
+                elif not user_exists(_uname):
+                    # ── 使用者不存在 ──────────────────────────────
+                    logger.warning("QR 登入失敗 ─ 使用者不存在  user=%s", _uname)
+                    st.error(f"❌ 使用者「{_uname}」不存在或已失效，請確認帳號後重試。")
                 else:
-                    st.error("❌ Token 無效或已過期，請重新掃描 QR Code。")
+                    # ── Step 3+4：密碼 + TOTP 驗證 ───────────────
+                    ok, reason = verify_login(_uname, _qr_password, _qr_totp)
+                    if ok:
+                        if confirm_qr_token(_qr_confirm_token, _uname):
+                            st.session_state.qr_mobile_confirmed = True
+                            st.session_state.qr_mobile_user = _uname
+                            logger.info(
+                                "QR Token 手機端確認 ─ user=%s  token=%s",
+                                _uname,
+                                _qr_confirm_token[:8] + "…",
+                            )
+                            st.rerun()
+                        else:
+                            st.error("❌ Token 無效或已過期，請重新掃描 QR Code。")
+                    else:
+                        _QR_ERRORS = {
+                            "wrong_password": "❌ 密碼錯誤，請重試。",
+                            "totp_required": "❌ 此帳號已啟用 Google 驗證，請輸入 6 位數驗證碼。",
+                            "wrong_totp": "❌ Google 驗證碼錯誤或已過期，請重試。",
+                            "not_found": "❌ 使用者不存在。",
+                        }
+                        logger.warning(
+                            "QR 登入失敗 ─ user=%s  reason=%s  token=%s",
+                            _uname,
+                            reason,
+                            _qr_confirm_token[:8] + "…",
+                        )
+                        st.error(_QR_ERRORS.get(reason, "❌ 驗證失敗，請重試。"))
 
     # ── 已確認：成功畫面 + 倒數關閉 ──────────────────────────────────
     else:
@@ -822,6 +863,108 @@ LOGIN_CSS = """
 """
 
 
+def _show_totp_enrollment() -> None:
+    """
+    首次 TOTP 設定閘門頁面。
+    在使用者第一次登入成功（密碼正確）後顯示，
+    強制完成 Google Authenticator 設定才可進入主程式。
+    session 尚未建立，無法繞過此頁面。
+    """
+    from core.totp import generate_secret, generate_setup_qr_png, verify_code
+    from core.users import save_totp_secret
+
+    enrolling_user: str = st.session_state.get("totp_enrolling_user", "")
+    if not enrolling_user:
+        st.rerun()
+        return
+
+    st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
+    st.markdown(LOGIN_CSS, unsafe_allow_html=True)
+
+    _, col, _ = st.columns([1, 1.6, 1])
+    with col:
+        st.markdown(
+            """
+            <div class="login-logo">
+                <span class="login-logo-icon">🛡️</span>
+                <div class="login-title">安全設定</div>
+                <div class="login-sub">請完成 Google 驗證器設定以繼續</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ── 產生 secret（只產生一次，存 session_state）──────────
+        if "totp_enroll_secret" not in st.session_state:
+            st.session_state.totp_enroll_secret = generate_secret()
+
+        secret: str = st.session_state.totp_enroll_secret
+
+        # ── Step 1：掃描 QR ───────────────────────────────────────
+        st.markdown("**Step 1** 　開啟 Google Authenticator，掃描下方 QR Code")
+        qr_png = generate_setup_qr_png(secret, enrolling_user)
+
+        col_qr, col_key = st.columns([1, 1])
+        with col_qr:
+            st.image(qr_png, width=180)
+        with col_key:
+            st.markdown("手動輸入密鑰：")
+            st.code(secret, language=None)
+            st.caption("⚠️ 請截圖或記錄此密鑰，遺失後無法復原。")
+
+        st.divider()
+
+        # ── Step 2：驗證碼確認 ────────────────────────────────────
+        st.markdown("**Step 2** 　輸入 App 顯示的 6 位數驗證碼")
+
+        with st.form("totp_enroll_form"):
+            confirm_code = st.text_input(
+                "驗證碼",
+                max_chars=6,
+                placeholder="請輸入 6 位數驗證碼",
+            )
+            col_submit, col_cancel = st.columns([2, 1])
+            with col_submit:
+                submitted = st.form_submit_button(
+                    "✅ 完成設定，進入系統", use_container_width=True, type="primary"
+                )
+            with col_cancel:
+                cancelled = st.form_submit_button("← 返回", use_container_width=True)
+
+        if submitted:
+            if verify_code(secret, confirm_code):
+                # 驗證通過 → 儲存 secret，建立 session，進入 App
+                if save_totp_secret(enrolling_user, secret):
+                    sid = create_session(enrolling_user)
+                    st.session_state.update(
+                        logged_in=True,
+                        username=enrolling_user,
+                        sid=sid,
+                    )
+                    # 清除 enrollment 相關 state
+                    st.session_state.pop("totp_enrolling_user", None)
+                    st.session_state.pop("totp_enroll_secret", None)
+                    st.query_params["sid"] = sid
+                    logger.info(
+                        "首次 TOTP 設定完成，進入系統 ─ user=%s  sid=%s",
+                        enrolling_user,
+                        sid[:8] + "…",
+                    )
+                    log_section("MAIN APPLICATION LOADED")
+                    st.rerun()
+                else:
+                    st.error("❌ 儲存失敗，請稍後再試。")
+            else:
+                st.error("❌ 驗證碼錯誤，請確認 App 時間同步後重試。")
+
+        if cancelled:
+            # 取消 → 清除所有 enrollment state，回到登入頁
+            st.session_state.pop("totp_enrolling_user", None)
+            st.session_state.pop("totp_enroll_secret", None)
+            logger.info("使用者取消 TOTP 設定 ─ user=%s", enrolling_user)
+            st.rerun()
+
+
 def show_login() -> None:
     log_section("LOGIN PAGE")
     logger.info("顯示登入畫面")
@@ -844,33 +987,59 @@ def show_login() -> None:
 
         tab_pw, tab_qr = st.tabs(["🔐 帳號密碼", "📱 QR Code 掃描登入"])
 
-        # ── Tab 1：原有帳密登入（不動）────────────────────────────
+        # ── Tab 1：帳號密碼 + TOTP 登入 ──────────────────────────
         with tab_pw:
             with st.form("login_form", clear_on_submit=False):
                 username = st.text_input("👤  帳號", placeholder="請輸入帳號")
                 password = st.text_input(
                     "🔒  密碼", type="password", placeholder="請輸入密碼"
                 )
+                totp_code = st.text_input(
+                    "🔐  Google 驗證碼",
+                    placeholder="6 位數驗證碼（未啟用可留空）",
+                    max_chars=6,
+                )
                 submit = st.form_submit_button("登 入", use_container_width=True)
 
             if submit:
+                from core.users import verify_login, get_totp_info  # 確保使用新版函式
+
                 logger.info("登入嘗試 ─ user=%s", username)
-                if verify_password(username, password):
-                    sid = create_session(username)
-                    st.session_state.update(logged_in=True, username=username, sid=sid)
-                    st.query_params["sid"] = sid
-                    logger.info("登入成功 ─ user=%s  sid=%s", username, sid[:8] + "…")
-                    log_section("MAIN APPLICATION LOADED")
-                    st.rerun()
+                ok, reason = verify_login(username, password, totp_code)
+                if ok:
+                    # ── 檢查是否已設定 TOTP ──────────────────────
+                    totp_enabled, _ = get_totp_info(username)
+                    if not totp_enabled:
+                        # 首次使用：導向 TOTP 強制設定閘門
+                        st.session_state.totp_enrolling_user = username
+                        logger.info("首次 TOTP 設定引導 ─ user=%s", username)
+                        st.rerun()
+                    else:
+                        # 已設定 TOTP → 正常建立 session
+                        sid = create_session(username)
+                        st.session_state.update(
+                            logged_in=True, username=username, sid=sid
+                        )
+                        st.query_params["sid"] = sid
+                        logger.info(
+                            "登入成功 ─ user=%s  sid=%s", username, sid[:8] + "…"
+                        )
+                        log_section("MAIN APPLICATION LOADED")
+                        st.rerun()
                 else:
-                    logger.warning("登入失敗 ─ user=%s", username)
-                    st.error("帳號或密碼錯誤，請重試。")
+                    _LOGIN_ERRORS = {
+                        "wrong_password": "帳號或密碼錯誤，請重試。",
+                        "totp_required": "此帳號已啟用 Google 驗證，請輸入 6 位數驗證碼。",
+                        "wrong_totp": "Google 驗證碼錯誤或已過期，請重試。",
+                        "not_found": "帳號不存在，請確認後重試。",
+                    }
+                    logger.warning("登入失敗 ─ user=%s  reason=%s", username, reason)
+                    st.error(_LOGIN_ERRORS.get(reason, "登入失敗，請稍後再試。"))
 
             st.markdown(
                 "<div class='login-hint'>測試帳號：admin / admin123 　或　 user / user123</div>",
                 unsafe_allow_html=True,
             )
-
         # ── Tab 2：QR Code 登入 ──────────────────────────────────
         with tab_qr:
             _show_qr_login_tab()
@@ -917,18 +1086,27 @@ def _show_qr_login_tab() -> None:
 
         # ✅ 確認成功 → 寫入 session_state，設定 flag
         if status == "confirmed" and confirmed_user:
+            from core.users import get_totp_info
+            totp_enabled, _ = get_totp_info(confirmed_user)
             consume_qr_token(token_id)
-            sid = create_session(confirmed_user)
 
-            # 一次性寫入所有登入狀態
-            st.session_state.update(
-                logged_in=True,
-                username=confirmed_user,
-                sid=sid,
-                qr_token_id=None,
-                qr_login_success=True,  # ← 外層偵測用的 flag
-            )
-            st.query_params["sid"] = sid
+            if not totp_enabled:
+                # QR 登入後同樣引導至 TOTP 設定閘門
+                st.session_state.update(
+                    totp_enrolling_user=confirmed_user,
+                    qr_token_id=None,
+                    qr_login_success=True,
+                )
+            else:
+                sid = create_session(confirmed_user)
+                st.session_state.update(
+                    logged_in=True,
+                    username=confirmed_user,
+                    sid=sid,
+                    qr_token_id=None,
+                    qr_login_success=True,
+                )
+                st.query_params["sid"] = sid
             logger.info(
                 "QR Token 確認完成，寫入 session ─ user=%s  sid=%s",
                 confirmed_user,
@@ -937,7 +1115,6 @@ def _show_qr_login_tab() -> None:
 
             # Fragment 層級 rerun，讓外層函式重跑並偵測到 flag
             st.rerun()
-            return
 
         # ── QR Code 顯示區 ───────────────────────────────────────
         from core.qr_login import generate_qr_image, build_confirm_url
@@ -1483,8 +1660,14 @@ def show_main() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  程式進入點
 # ══════════════════════════════════════════════════════════════════════════════
+if st.session_state.get("totp_enrolling_user"):
+    # 密碼已驗證，但尚未設定 TOTP → 顯示設定閘門
+    _show_totp_enrollment()
 
-if st.session_state.logged_in:
+elif st.session_state.logged_in:
+    # 正常已登入 → 進入主程式
     show_main()
+
 else:
+    # 未登入 → 顯示登入頁
     show_login()
