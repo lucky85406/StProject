@@ -12,6 +12,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
+from core.users import get_user_id
 
 import streamlit as st
 
@@ -172,6 +173,105 @@ _PAGE_CSS = """
 </style>
 """
 
+_MOBILE_CSS = """
+<style>
+/* ══════════════════════════════════════════════════════
+   📱 Mobile Responsive — 手機優化樣式
+   適用寬度 ≤ 768px（手機 / 小螢幕平板）
+══════════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+
+  /* ── KPI 卡片：3欄改成 1欄垂直堆疊 ── */
+  .exp-kpi-row {
+    grid-template-columns: 1fr !important;
+    gap: 0.6rem !important;
+  }
+  .exp-kpi-card {
+    padding: 1rem 1.1rem !important;
+  }
+  .exp-kpi-card .kpi-value {
+    font-size: 1.5rem !important;
+  }
+
+  /* ── 表單卡片：加大 padding，方便手指操作 ── */
+  .exp-form-card {
+    padding: 1.2rem !important;
+    border-radius: 12px !important;
+  }
+
+  /* ── 消費明細列表：優化行高與字體 ── */
+  .exp-item {
+    padding: 1rem 0.9rem !important;
+    gap: 10px !important;
+    border-radius: 10px !important;
+  }
+  .exp-item-icon {
+    width: 42px !important;
+    height: 42px !important;
+    font-size: 1.3rem !important;
+  }
+  .exp-item-cat  { font-size: 0.68rem !important; }
+  .exp-item-note { font-size: 0.85rem !important; }
+  .exp-item-amount {
+    font-size: 1.15rem !important;
+    font-weight: 800 !important;
+  }
+
+  /* ── 預算橫幅：縮小字體 ── */
+  .exp-budget-warn,
+  .exp-budget-ok {
+    font-size: 0.80rem !important;
+    padding: 0.75rem 1rem !important;
+  }
+
+  /* ── 歷史篩選工具列 ── */
+  .hist-toolbar {
+    padding: 0.9rem 1rem !important;
+    border-radius: 12px !important;
+  }
+
+  /* ── Streamlit 原生元件在手機的覆蓋 ── */
+  /* 數字輸入框放大，防止 iOS 自動縮放 */
+  input[type="number"],
+  input[type="text"],
+  textarea {
+    font-size: 16px !important;   /* iOS 低於 16px 會觸發縮放 */
+  }
+
+  /* 按鈕加高，符合 iOS HIG 44pt 最小觸控高度 */
+  [data-testid="stBaseButton-primary"],
+  [data-testid="stBaseButton-secondary"] {
+    min-height: 48px !important;
+    font-size: 0.95rem !important;
+  }
+
+  /* Tabs 標籤字體縮小以防換行 */
+  [data-testid="stTabs"] button {
+    font-size: 0.82rem !important;
+    padding: 0.5rem 0.8rem !important;
+  }
+
+  /* 空白狀態卡片 */
+  .exp-empty {
+    padding: 2rem 0.8rem !important;
+  }
+  .exp-empty .empty-icon { font-size: 2rem !important; }
+}
+
+/* ── 超窄手機（≤ 390px）追加補強 ── */
+@media (max-width: 390px) {
+  .exp-kpi-card .kpi-value {
+    font-size: 1.3rem !important;
+  }
+  .hist-stat-row {
+    flex-direction: column !important;
+    gap: 0.5rem !important;
+  }
+}
+</style>
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  共用 Helper
@@ -266,7 +366,7 @@ def _render_budget_banner(summary: TodaySummary) -> None:
         )
 
 
-def _render_add_form(categories: list[Category]) -> bool:
+def _render_add_form(categories: list[Category], user_id: str) -> bool:
     """快速新增表單，回傳 True 表示送出成功。"""
     if not categories:
         st.warning("⚠️ 無法載入類別資料，請檢查資料庫連線。")
@@ -339,6 +439,7 @@ def _render_add_form(categories: list[Category]) -> bool:
         return False
 
     new_id = add_expense(
+        user_id=user_id,
         amount=amount_decimal,
         category_id=selected_cat_id,
         recorded_at=datetime.now(timezone.utc),
@@ -354,7 +455,7 @@ def _render_add_form(categories: list[Category]) -> bool:
     return False
 
 
-def _render_today_list(expenses: list[Expense]) -> None:
+def _render_today_list(expenses: list[Expense], user_id: str) -> None:
     """今日明細列表（含二次確認刪除）。"""
     st.markdown(
         '<div style=\'font-size:0.65rem;font-family:"DM Mono",monospace;'
@@ -380,7 +481,7 @@ def _render_today_list(expenses: list[Expense]) -> None:
             confirm_key = f"del_confirm_{exp.id}"
             if st.session_state.get(confirm_key):
                 if st.button("✓", key=f"del_ok_{exp.id}", help="確認刪除"):
-                    if soft_delete_expense(exp.id):
+                    if soft_delete_expense(user_id,exp.id):
                         st.session_state.pop(confirm_key, None)
                         st.toast("已刪除此筆記錄", icon="🗑️")
                         st.rerun()
@@ -390,19 +491,19 @@ def _render_today_list(expenses: list[Expense]) -> None:
                     st.rerun()
 
 
-def _tab_today(categories: list[Category]) -> None:
-    """Tab 1 主渲染函式。"""
-    summary: TodaySummary = get_today_summary()
+# ③ 所有子函式簽名更新，以 _tab_today 為例：
+def _tab_today(categories: list[Category], user_id: str) -> None:
+    summary = get_today_summary(user_id)  # ← 帶入 user_id
     _render_kpi_cards(summary)
     _render_budget_banner(summary)
 
-    col_form, col_list = st.columns([5, 5], gap="large")
+    col_form, col_list = st.columns([1, 1.2])
     with col_form:
-        if _render_add_form(categories):
-            st.toast("✅ 消費已記錄！", icon="🎉")
+        if _render_add_form(categories, user_id):  # ← 帶入 user_id
+            st.toast("✅ 已新增！", icon="💰")
             st.rerun()
     with col_list:
-        _render_today_list(summary.expenses)
+        _render_today_list(summary.expenses, user_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -410,7 +511,7 @@ def _tab_today(categories: list[Category]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _render_edit_form(exp: Expense, categories: list[Category]) -> bool:
+def _render_edit_form(exp: Expense, categories: list[Category], user_id: str) -> bool:
     """
     展開式編輯表單，回傳 True 表示儲存成功。
     嵌入在 st.expander 內呼叫。
@@ -488,6 +589,7 @@ def _render_edit_form(exp: Expense, categories: list[Category]) -> bool:
                 return False
 
             ok = update_expense(
+                user_id=user_id,
                 expense_id=exp.id,
                 amount=amount_dec,
                 category_id=new_cat_id,
@@ -524,7 +626,7 @@ def _render_history_stats(expenses: list[Expense]) -> None:
     )
 
 
-def _tab_history(categories: list[Category]) -> None:
+def _tab_history(categories: list[Category], user_id: str) -> None:
     """Tab 2 主渲染函式 — 歷史記錄查詢（F-04）。"""
 
     today = date.today()
@@ -584,6 +686,7 @@ def _tab_history(categories: list[Category]) -> None:
 
     # ── 查詢資料 ──────────────────────────────────────────────────
     expenses = get_expenses(
+        user_id=user_id,
         start_date=start_date,
         end_date=end_date,
         category_id=selected_cat_id,
@@ -668,19 +771,37 @@ def _tab_history(categories: list[Category]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ② 在 show() 開頭取得 user_id（必須已登入才能到此頁）
 def show() -> None:
-    logger.info("渲染消費記錄頁 ─ user=%s", st.session_state.get("username"))
-    st.markdown(_PAGE_CSS, unsafe_allow_html=True)
+    # ── 取得 user_id（優先從 session，沒有則即時查詢並補存）──────
+    user_id: Optional[int] = st.session_state.get("user_id")
 
-    # 類別資料所有 Tab 共用，只查一次
-    categories = get_all_categories()
+    if not user_id:
+        username: str = st.session_state.get("username", "")
+        if username:
+            user_id = get_user_id(username)
+            if user_id:
+                # 補存到 session，後續不再重查
+                st.session_state["user_id"] = user_id
+                logger.info("user_id 補查成功 ─ user=%s  id=%s", username, user_id)
+
+    if not user_id:
+        st.error("❌ 無法取得使用者資訊，請重新登入。")
+        logger.error("show() 缺少 user_id ─ session=%s", dict(st.session_state))
+        return
+
+    logger.info(
+        "渲染消費記錄頁 ─ user=%s  id=%s", st.session_state.get("username"), user_id
+    )
+    st.markdown(_PAGE_CSS, unsafe_allow_html=True)
+    st.markdown(_MOBILE_CSS, unsafe_allow_html=True)
+
+    categories = get_all_categories(user_id)
 
     tab_today, tab_history = st.tabs(["📅 今日總覽", "📋 歷史記錄"])
-
     with tab_today:
-        _tab_today(categories)
-
+        _tab_today(categories, user_id)
     with tab_history:
-        _tab_history(categories)
+        _tab_history(categories, user_id)
 
     logger.info("消費記錄頁渲染完成")

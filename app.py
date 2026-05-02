@@ -21,7 +21,7 @@ from core.qr_store import (
 from core.qr_login import generate_qr_image, build_confirm_url
 
 from core.session_store import create_session, verify_session, delete_session
-from core.users import verify_password
+from core.users import verify_password, get_user_id
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  全域 Log 設定
@@ -936,10 +936,12 @@ def _show_totp_enrollment() -> None:
                 # 驗證通過 → 儲存 secret，建立 session，進入 App
                 if save_totp_secret(enrolling_user, secret):
                     sid = create_session(enrolling_user)
+                    user_id  = get_user_id(enrolling_user)  # ← 新增
                     st.session_state.update(
                         logged_in=True,
                         username=enrolling_user,
                         sid=sid,
+                        user_id=user_id,
                     )
                     # 清除 enrollment 相關 state
                     st.session_state.pop("totp_enrolling_user", None)
@@ -1017,8 +1019,9 @@ def show_login() -> None:
                     else:
                         # 已設定 TOTP → 正常建立 session
                         sid = create_session(username)
+                        user_id = get_user_id(username)
                         st.session_state.update(
-                            logged_in=True, username=username, sid=sid
+                            logged_in=True, username=username, sid=sid, user_id=user_id
                         )
                         st.query_params["sid"] = sid
                         logger.info(
@@ -1099,10 +1102,12 @@ def _show_qr_login_tab() -> None:
                 )
             else:
                 sid = create_session(confirmed_user)
+                user_id = get_user_id(confirmed_user)
                 st.session_state.update(
                     logged_in=True,
                     username=confirmed_user,
                     sid=sid,
+                    user_id=user_id,
                     qr_token_id=None,
                     qr_login_success=True,
                 )

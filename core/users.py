@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import bcrypt
 from core.db import get_client
-from typing import Literal
+from typing import Literal, Optional
 from core.totp import verify_code
 
 logger = logging.getLogger("core.users")
@@ -218,3 +218,24 @@ def verify_login(
 
     logger.info("登入成功 ─ user=%s  totp_used=%s", username, totp_enabled)
     return True, "ok"
+
+
+# core/users.py — 函式名稱與回傳型別更新
+def get_user_id(username: str) -> Optional[int]:
+    """
+    依 username 查詢使用者的數字 ID (users.id bigint)。
+    登入後存入 st.session_state.user_id 供 DB 操作使用。
+    """
+    try:
+        client = get_client()
+        result = (
+            client.table("users")
+            .select("id")
+            .eq("username", username)
+            .single()
+            .execute()
+        )
+        return int(result.data["id"]) if result.data else None
+    except Exception as e:
+        logger.error("get_user_id 失敗 ─ username=%s  error=%s", username, e)
+        return None
