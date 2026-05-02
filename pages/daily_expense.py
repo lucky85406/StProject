@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from tkinter import N
 from typing import Optional
 from core.users import get_user_id
 
@@ -378,7 +379,7 @@ def _render_add_form(categories: list[Category], user_id: str) -> bool:
         )
 
         # Step 1：金額
-        st.markdown("**① 輸入金額**")
+        st.markdown("**1️⃣ 輸入金額**")
         amount_input: float = st.number_input(
             "消費金額（NT$）",
             min_value=0.0,
@@ -391,10 +392,15 @@ def _render_add_form(categories: list[Category], user_id: str) -> bool:
         )
 
         # Step 2：類別
-        st.markdown("**② 選擇類別**")
         if "exp_selected_cat" not in st.session_state:
             st.session_state.exp_selected_cat = categories[0].id
-
+        if "exp_selected_cat_name" not in st.session_state:
+            st.session_state.exp_selected_cat_name = (
+                f"{categories[0].icon}\n{categories[0].name}"
+            )
+        st.markdown(
+            f"**2️⃣ 選擇類別({st.session_state.exp_selected_cat_name})**"
+        )
         for row_start in range(0, len(categories), 4):
             row_cats = categories[row_start : row_start + 4]
             cols = st.columns(len(row_cats))
@@ -407,13 +413,15 @@ def _render_add_form(categories: list[Category], user_id: str) -> bool:
                         use_container_width=True,
                         type="primary" if is_selected else "secondary",
                     ):
+                        st.session_state.exp_selected_cat_name = (
+                            f"{cat.icon}\n{cat.name}"
+                        )
                         st.session_state.exp_selected_cat = cat.id
                         st.rerun()
-
         selected_cat_id: str = st.session_state.exp_selected_cat
 
         # Step 3：備註
-        st.markdown("**③ 備註（選填）**")
+        st.markdown("**3️⃣ 備註（選填）**")
         note: str = st.text_input(
             "備註",
             max_chars=200,
@@ -481,7 +489,7 @@ def _render_today_list(expenses: list[Expense], user_id: str) -> None:
             confirm_key = f"del_confirm_{exp.id}"
             if st.session_state.get(confirm_key):
                 if st.button("✓", key=f"del_ok_{exp.id}", help="確認刪除"):
-                    if soft_delete_expense(user_id,exp.id):
+                    if soft_delete_expense(user_id, exp.id):
                         st.session_state.pop(confirm_key, None)
                         st.toast("已刪除此筆記錄", icon="🗑️")
                         st.rerun()
@@ -798,7 +806,7 @@ def show() -> None:
 
     categories = get_all_categories(user_id)
 
-    tab_today, tab_history = st.tabs(["📅 今日總覽", "📋 歷史記錄"])
+    tab_today, tab_history = st.tabs(["**📅 今日總覽**", "**📋 歷史記錄**"])
     with tab_today:
         _tab_today(categories, user_id)
     with tab_history:

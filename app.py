@@ -234,7 +234,7 @@ header[data-testid="stHeader"] {
 }
 .sb-brand-icon { font-size: 1.6rem; }
 .sb-brand-text {
-    font-size: 1.1rem;
+    font-size: 1.5rem;
     font-weight: 800;
     background: var(--grad);
     -webkit-background-clip: text;
@@ -242,7 +242,7 @@ header[data-testid="stHeader"] {
     letter-spacing: -0.01em;
 }
 .sb-brand-sub {
-    font-size: 0.62rem;
+    font-size: 0.8rem;
     color: var(--text-muted);
     font-family: var(--mono);
     letter-spacing: 0.06em;
@@ -292,7 +292,7 @@ header[data-testid="stHeader"] {
 }
 .sb-params-wrap { padding: 0 1rem 1rem; flex: 1; overflow-y: auto; }
 .sb-params-title {
-    font-size: 0.58rem;
+    font-size: 1rem;
     font-family: var(--mono);
     color: var(--text-muted);
     text-transform: uppercase;
@@ -1410,11 +1410,15 @@ def render_sidebar(active_id: str) -> str:
             unsafe_allow_html=True,
         )
 
+        side_user, side_logout = st.sidebar.columns(
+            [5, 2], gap="xxsmall", vertical_alignment="bottom"
+        )
+
         # ── User chip（一列）──────────────────────────────────────
         uname = st.session_state.get("username", "?")
         initial = uname[0].upper() if uname else "?"
 
-        st.markdown(
+        side_user.markdown(
             f"""
             <div class="sb-user-chip">
                 <div class="sb-user-avatar">{initial}</div>
@@ -1425,7 +1429,7 @@ def render_sidebar(active_id: str) -> str:
         )
 
         # ── 登出按鈕（下一列，secondary type，CSS 精確定位）─────────
-        if logout_clicked := st.button(
+        if logout_clicked := side_logout.button(
             "🚪  登出", key="logout_btn", use_container_width=True
         ):
             logger.info("使用者登出 ─ user=%s", st.session_state.get("username"))
@@ -1437,7 +1441,7 @@ def render_sidebar(active_id: str) -> str:
 
         # ── 導覽按鈕（上半部）─────────────────────────────────────
         st.markdown(
-            '<p style=\'font-size:0.58rem;font-family:"JetBrains Mono",monospace;'
+            '<p style=\'font-size:1rem;font-family:"JetBrains Mono",monospace;'
             "color:#8890a4;text-transform:uppercase;letter-spacing:0.12em;"
             "padding:0 4px;margin:0.6rem 0 0.5rem'>▪ 功能導覽</p>",
             unsafe_allow_html=True,
