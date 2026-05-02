@@ -560,245 +560,188 @@ if "active_page" not in st.session_state:
 _qr_confirm_token: str = st.query_params.get("qr_confirm", "")
 
 if _qr_confirm_token and not st.session_state.get("logged_in"):
-    from core.qr_store import confirm_qr_token, check_qr_token
+    if not st.session_state.get("qr_mobile_confirmed"):
 
-    st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
-
-    # ── 手機確認頁 CSS（獨立變數，開頭不留空行）────────────────────
-    _QR_MOBILE_CSS: str = (
-        "<style>"
-        "#MainMenu,footer,header,[data-testid='stToolbar']{display:none!important}"
-        ".qr-card{background:#fff;border:1px solid rgba(124,111,247,.20);"
-        "border-radius:20px;padding:2.5rem 2rem;max-width:360px;width:90vw;"
-        "box-shadow:0 8px 40px rgba(124,111,247,.14);text-align:center;margin:auto}"
-        ".qr-icon{font-size:3.5rem;display:block;margin-bottom:.8rem}"
-        ".qr-title{font-size:1.4rem;font-weight:800;"
-        "background:linear-gradient(135deg,#7c6ff7,#e879a0);"
-        "-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.4rem}"
-        ".qr-sub{font-size:.82rem;color:#8b85a8;margin-bottom:1.8rem}"
-        ".qr-countdown-wrap{display:flex;flex-direction:column;"
-        "align-items:center;gap:.8rem;margin:1.5rem 0}"
-        ".qr-countdown-circle{width:72px;height:72px;border-radius:50%;"
-        "background:linear-gradient(135deg,#7c6ff7,#e879a0);"
-        "display:flex;align-items:center;justify-content:center;"
-        "font-size:1.8rem;font-weight:800;color:#fff;"
-        "box-shadow:0 4px 20px rgba(124,111,247,.35);"
-        "animation:pulse 1s ease-in-out infinite}"
-        "@keyframes pulse{"
-        "0%,100%{transform:scale(1);box-shadow:0 4px 20px rgba(124,111,247,.35)}"
-        "50%{transform:scale(1.06);box-shadow:0 6px 28px rgba(124,111,247,.50)}}"
-        ".qr-countdown-label{font-size:.82rem;color:#5c5580;font-weight:600}"
-        ".qr-close-hint{font-size:.75rem;color:#b8b2d0;margin-top:1rem;"
-        "padding:8px 14px;background:rgba(124,111,247,.06);"
-        "border-radius:8px;display:none}"
-        ".qr-close-hint.show{display:block}"
-        ".qr-check{width:72px;height:72px;border-radius:50%;"
-        "background:linear-gradient(135deg,#10b981,#059669);"
-        "display:flex;align-items:center;justify-content:center;"
-        "font-size:2rem;color:#fff;margin:1rem auto;"
-        "box-shadow:0 4px 20px rgba(16,185,129,.35);"
-        "animation:pop .4s cubic-bezier(.175,.885,.32,1.275)}"
-        "@keyframes pop{from{transform:scale(0);opacity:0}to{transform:scale(1);opacity:1}}"
-        "</style>"
-    )
-    st.markdown(_QR_MOBILE_CSS, unsafe_allow_html=True)
-
-    # ── Token 有效性檢查 ──────────────────────────────────────────
-    token_status, _ = check_qr_token(_qr_confirm_token)
-
-    if token_status == "expired":
-        _, _c, _ = st.columns([1, 2, 1])
-        with _c:
-            st.error("❌ 此 QR Code 已過期，請回到電腦端重新掃描。")
-        st.stop()
-
-    # ── 狀態初始化 ────────────────────────────────────────────────
-    if "qr_mobile_confirmed" not in st.session_state:
-        st.session_state.qr_mobile_confirmed = False
-
-    # ── 未確認：顯示帳號選擇 + 確認按鈕 ─────────────────────────
-    if not st.session_state.qr_mobile_confirmed:
-        _, _c, _ = st.columns([0.5, 2, 0.5])
-        with _c:
-            # HTML 緊貼左邊界，不留縮排
+        _, col, _ = st.columns([1, 2, 1])
+        with col:
             st.markdown(
-                '<div class="qr-card">'
-                '<span class="qr-icon">📱</span>'
-                '<div class="qr-title">QR Code 登入確認</div>'
-                '<div class="qr-sub">請確認是由您本人操作，再選擇帳號完成授權</div>'
-                "</div>",
+                "<style>"
+                "#MainMenu,footer,header,[data-testid='stToolbar']{display:none!important}"
+                "</style>",
                 unsafe_allow_html=True,
             )
-            # ── Step 2：輸入帳號、密碼、TOTP ────────────────────
+            st.markdown(
+                '<div style="text-align:center;padding:1.5rem 0 1rem;">'
+                '<div style="font-size:2rem">📱</div>'
+                '<div style="font-size:1.2rem;font-weight:800;color:#3b3552">QR Code 登入確認</div>'
+                '<div style="font-size:.85rem;color:#8b85a8;margin-top:.3rem">'
+                '請輸入您的帳號，系統將自動驗證此設備</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            # ── 從 HTTP headers 收集設備指紋（伺服器端，無 JS 時序問題）──
+            _headers = st.context.headers
+            _ua    = _headers.get("User-Agent", "")
+            _lang  = _headers.get("Accept-Language", "")
+            _fp_raw = f"{_ua}|{_lang}"
+
             _qr_username: str = st.text_input(
-                "輸入登入帳號",
-                placeholder="請輸入您的帳號",
-                key="qr_mobile_username",
+                "帳號",
+                placeholder="請輸入您的登入帳號",
+                key="qr_device_username",
             )
-            _qr_password: str = st.text_input(
-                "輸入密碼",
-                type="password",
-                placeholder="請輸入密碼",
-                key="qr_mobile_password",
-            )
-            _qr_totp: str = st.text_input(
-                "Google 驗證碼（6 位數）",
-                placeholder="開啟 Google Authenticator 取得",
-                max_chars=6,
-                key="qr_mobile_totp",
-            )
+
             if st.button(
-                "✅ 確認登入此帳號",
+                "✅ 驗證並登入",
                 use_container_width=True,
                 type="primary",
-                key="qr_mobile_confirm_btn",
+                key="qr_device_confirm_btn",
             ):
-                from core.users import user_exists, verify_login
+                from core.users import user_exists
+                from core.device_auth import compute_device_hash, verify_device
+                from core.qr_store import confirm_qr_token
 
                 _uname = _qr_username.strip()
 
                 if not _uname:
                     st.error("❌ 請輸入帳號後再確認。")
+
                 elif not user_exists(_uname):
-                    # ── 使用者不存在 ──────────────────────────────
-                    logger.warning("QR 登入失敗 ─ 使用者不存在  user=%s", _uname)
-                    st.error(f"❌ 使用者「{_uname}」不存在或已失效，請確認帳號後重試。")
+                    logger.warning("QR 設備登入失敗 ─ 使用者不存在  user=%s", _uname)
+                    st.error(f"❌ 帳號「{_uname}」不存在，請確認後重試。")
+
+                elif not _fp_raw or len(_fp_raw) < 10:
+                    # UA 完全空白才觸發（極罕見）
+                    logger.warning("QR 設備登入失敗 ─ 無法取得 UA  user=%s", _uname)
+                    st.error("❌ 無法識別此設備，請確認瀏覽器未封鎖 User-Agent。")
+
                 else:
-                    # ── Step 3+4：密碼 + TOTP 驗證 ───────────────
-                    ok, reason = verify_login(_uname, _qr_password, _qr_totp)
-                    if ok:
-                        if confirm_qr_token(_qr_confirm_token, _uname):
+                    _device_hash = compute_device_hash(_fp_raw)
+
+                    if not verify_device(_uname, _device_hash):
+                        logger.warning(
+                            "QR 設備登入失敗 ─ 設備未綁定  user=%s  hash=%s…",
+                            _uname, _device_hash[:8],
+                        )
+                        st.error(
+                            "❌ 此設備尚未綁定至您的帳號，"
+                            "請先以帳號密碼登入後至「設定 → 設備管理」完成綁定。"
+                        )
+                    else:
+                        if confirm_qr_token(_qr_confirm_token, _uname, _device_hash):
                             st.session_state.qr_mobile_confirmed = True
                             st.session_state.qr_mobile_user = _uname
                             logger.info(
-                                "QR Token 手機端確認 ─ user=%s  token=%s",
-                                _uname,
-                                _qr_confirm_token[:8] + "…",
+                                "QR 設備登入確認成功 ─ user=%s  token=%s",
+                                _uname, _qr_confirm_token[:8] + "…",
                             )
                             st.rerun()
                         else:
                             st.error("❌ Token 無效或已過期，請重新掃描 QR Code。")
-                    else:
-                        _QR_ERRORS = {
-                            "wrong_password": "❌ 密碼錯誤，請重試。",
-                            "totp_required": "❌ 此帳號已啟用 Google 驗證，請輸入 6 位數驗證碼。",
-                            "wrong_totp": "❌ Google 驗證碼錯誤或已過期，請重試。",
-                            "not_found": "❌ 使用者不存在。",
-                        }
-                        logger.warning(
-                            "QR 登入失敗 ─ user=%s  reason=%s  token=%s",
-                            _uname,
-                            reason,
-                            _qr_confirm_token[:8] + "…",
-                        )
-                        st.error(_QR_ERRORS.get(reason, "❌ 驗證失敗，請重試。"))
-
-    # ── 已確認：成功畫面 + 倒數關閉 ──────────────────────────────────
+        # ── 已確認：成功畫面 + 倒數自動關閉 ─────────────────────────────
     else:
         _confirmed_user: str = st.session_state.get("qr_mobile_user", "使用者")
-
         st.session_state.pop("qr_mobile_confirmed", None)
         st.session_state.pop("qr_mobile_user", None)
 
         _success_html: str = f"""<!DOCTYPE html>
-    <html lang="zh-Hant">
-    <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <style>
-    *{{margin:0;padding:0;box-sizing:border-box}}
-    body{{
-        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-        background:linear-gradient(145deg,#f0f4ff 0%,#faf5ff 50%,#fff0f9 100%);
-        min-height:100vh;
-        display:flex;align-items:center;justify-content:center;
-    }}
-    .card{{
-        background:#fff;border:1px solid rgba(124,111,247,.20);
-        border-radius:20px;padding:2.5rem 2rem;
-        max-width:340px;width:90vw;
-        box-shadow:0 8px 40px rgba(124,111,247,.14);text-align:center;
-    }}
-    .check{{
-        width:72px;height:72px;border-radius:50%;
-        background:linear-gradient(135deg,#10b981,#059669);
-        display:flex;align-items:center;justify-content:center;
-        font-size:2rem;color:#fff;margin:0 auto 1rem;
-        box-shadow:0 4px 20px rgba(16,185,129,.35);
-        animation:pop .4s cubic-bezier(.175,.885,.32,1.275);
-    }}
-    @keyframes pop{{from{{transform:scale(0);opacity:0}}to{{transform:scale(1);opacity:1}}}}
-    .title{{
-        font-size:1.3rem;font-weight:800;
-        background:linear-gradient(135deg,#7c6ff7,#e879a0);
-        -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-        margin-bottom:.4rem;
-    }}
-    .sub{{font-size:.85rem;color:#8b85a8;margin-bottom:1.5rem;line-height:1.6}}
-    .sub strong{{color:#5c5580}}
-    .circle{{
-        width:64px;height:64px;border-radius:50%;
-        background:linear-gradient(135deg,#7c6ff7,#e879a0);
-        display:flex;align-items:center;justify-content:center;
-        font-size:1.6rem;font-weight:800;color:#fff;
-        margin:0 auto .6rem;
-        box-shadow:0 4px 20px rgba(124,111,247,.35);
-        animation:pulse 1s ease-in-out infinite;
-    }}
-    @keyframes pulse{{0%,100%{{transform:scale(1)}}50%{{transform:scale(1.08)}}}}
-    .label{{font-size:.82rem;color:#5c5580;font-weight:600;margin-bottom:1rem}}
-    .hint{{
-        font-size:.82rem;color:#7c6ff7;font-weight:600;
-        background:rgba(124,111,247,.08);border:1px solid rgba(124,111,247,.20);
-        border-radius:10px;padding:10px 16px;margin-top:.5rem;line-height:1.6;
-    }}
-    </style>
-    </head>
-    <body>
-    <div class="card">
-        <div class="check">✓</div>
-        <div class="title">授權成功！</div>
-        <div class="sub">帳號 <strong>{_confirmed_user}</strong> 已完成驗證<br>電腦端將自動登入</div>
-        <div class="circle" id="num">3</div>
-        <div class="label">秒後自動關閉此頁面</div>
-        <div class="hint" id="hint">✋ 請手動關閉此分頁</div>
-    </div>
-    <script>
-    (function(){{
-        var count=3;
-        var numEl=document.getElementById('num');
-        var hintEl=document.getElementById('hint');
-        hintEl.style.display='none';
-        var timer=setInterval(function(){{
-            count--;
-            if(numEl)numEl.textContent=count;
-            if(count<=0){{
-                clearInterval(timer);
-                try{{window.top.location.replace('about:blank');}}catch(e1){{
-                    try{{window.parent.location.replace('about:blank');}}catch(e2){{
-                        try{{window.location.replace('about:blank');}}catch(e3){{}}
-                        hintEl.style.display='block';
-                        if(numEl){{numEl.textContent='✓';numEl.style.animation='none';}}
+        <html lang="zh-Hant">
+        <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>
+        *{{margin:0;padding:0;box-sizing:border-box}}
+        body{{
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+            background:linear-gradient(145deg,#f0f4ff 0%,#faf5ff 50%,#fff0f9 100%);
+            padding:2rem 1rem;
+            display:flex;align-items:flex-start;justify-content:center;
+        }}
+        .card{{
+            background:#fff;border:1px solid rgba(124,111,247,.20);
+            border-radius:20px;padding:2rem 1.8rem 1.8rem;
+            max-width:320px;width:100%;
+            box-shadow:0 8px 40px rgba(124,111,247,.14);text-align:center;
+        }}
+        .check{{
+            width:64px;height:64px;border-radius:50%;
+            background:linear-gradient(135deg,#10b981,#059669);
+            display:flex;align-items:center;justify-content:center;
+            font-size:1.8rem;color:#fff;margin:0 auto .9rem;
+            box-shadow:0 4px 20px rgba(16,185,129,.35);
+            animation:pop .4s cubic-bezier(.175,.885,.32,1.275);
+        }}
+        @keyframes pop{{from{{transform:scale(0);opacity:0}}to{{transform:scale(1);opacity:1}}}}
+        .title{{
+            font-size:1.2rem;font-weight:800;
+            background:linear-gradient(135deg,#7c6ff7,#e879a0);
+            -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+            margin-bottom:.35rem;
+        }}
+        .sub{{font-size:.82rem;color:#8b85a8;margin-bottom:1.2rem;line-height:1.6}}
+        .sub strong{{color:#5c5580}}
+        .circle{{
+            width:56px;height:56px;border-radius:50%;
+            background:linear-gradient(135deg,#7c6ff7,#e879a0);
+            display:flex;align-items:center;justify-content:center;
+            font-size:1.4rem;font-weight:800;color:#fff;
+            margin:0 auto .5rem;
+            box-shadow:0 4px 20px rgba(124,111,247,.35);
+            animation:pulse 1s ease-in-out infinite;
+        }}
+        @keyframes pulse{{0%,100%{{transform:scale(1)}}50%{{transform:scale(1.08)}}}}
+        .label{{font-size:.78rem;color:#5c5580;font-weight:600}}
+        .hint{{
+            font-size:.78rem;color:#7c6ff7;font-weight:600;
+            background:rgba(124,111,247,.08);border:1px solid rgba(124,111,247,.20);
+            border-radius:10px;padding:8px 14px;margin-top:.9rem;
+            line-height:1.6;display:none;
+        }}
+        </style>
+        </head>
+        <body>
+        <div class="card">
+            <div class="check">✓</div>
+            <div class="title">授權成功！</div>
+            <div class="sub">帳號 <strong>{_confirmed_user}</strong> 已完成驗證<br>電腦端將自動登入</div>
+            <div class="circle" id="num">3</div>
+            <div class="label">秒後自動關閉此頁面</div>
+            <div class="hint" id="hint">✋ 請手動關閉此分頁</div>
+        </div>
+        <script>
+        (function(){{
+            var count = 3;
+            var numEl  = document.getElementById('num');
+            var hintEl = document.getElementById('hint');
+            var timer  = setInterval(function() {{
+                count--;
+                if (numEl) numEl.textContent = count;
+                if (count <= 0) {{
+                    clearInterval(timer);
+                    try {{ window.top.location.replace('about:blank'); }} catch(e1) {{
+                        try {{ window.parent.location.replace('about:blank'); }} catch(e2) {{
+                            try {{ window.location.replace('about:blank'); }} catch(e3) {{}}
+                            hintEl.style.display = 'block';
+                            if (numEl) {{
+                                numEl.textContent = '✓';
+                                numEl.style.animation = 'none';
+                            }}
+                        }}
                     }}
                 }}
-            }}
-        }},1000);
-    }})();
-    </script>
-    </body>
-    </html>"""
+            }}, 1000);
+        }})();
+        </script>
+        </body>
+        </html>"""
 
-        # DeprecationWarning 暫時壓制：
-        # st.iframe 目前不支援 srcdoc（inline HTML），
-        # components.v1.html 實際移除日為 2026-06-01，暫時保留使用。
         import streamlit.components.v1 as components
-
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
-            components.html(_success_html, height=360, scrolling=False)
+            components.html(_success_html, height=420, scrolling=False)
 
         st.stop()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  登入畫面

@@ -1,19 +1,14 @@
-# core/qr_store.py
-"""
-QR Code 登入 Token 管理
-Token 狀態機：pending → confirmed → (consumed)
-TTL：120 秒後自動視為過期
-"""
+# core/qr_store.py  ← 修改後完整版
 from __future__ import annotations
 
 import json
 import time
 import uuid
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 _QR_STORE_FILE = Path(".qr_store.json")
-_QR_TTL_SECONDS = 120  # QR Code 有效期 2 分鐘
+_QR_TTL_SECONDS = 120
 
 QrStatus = Literal["pending", "confirmed", "expired"]
 
@@ -38,15 +33,20 @@ def create_qr_token() -> str:
     data[token_id] = {
         "status": "pending",
         "username": None,
+        "device_hash": None,  # ← 新增：綁定的設備 hash
         "created_at": time.time(),
     }
     _save(data)
     return token_id
 
 
-def confirm_qr_token(token_id: str, username: str) -> bool:
+def confirm_qr_token(
+    token_id: str,
+    username: str,
+    device_hash: Optional[str] = None,  # ← 新增參數
+) -> bool:
     """
-    手機端掃描後呼叫：確認 Token 並綁定使用者。
+    手機端掃描後呼叫：確認 Token 並綁定使用者與設備 hash。
     回傳 True 表示成功，False 表示 Token 無效或已過期。
     """
     data = _load()
@@ -61,6 +61,7 @@ def confirm_qr_token(token_id: str, username: str) -> bool:
 
     record["status"] = "confirmed"
     record["username"] = username
+    record["device_hash"] = device_hash  # ← 新增
     record["confirmed_at"] = time.time()
     data[token_id] = record
     _save(data)
@@ -68,10 +69,7 @@ def confirm_qr_token(token_id: str, username: str) -> bool:
 
 
 def check_qr_token(token_id: str) -> tuple[QrStatus, str | None]:
-    """
-    瀏覽器輪詢用：檢查 Token 狀態。
-    回傳 (status, username)；username 僅在 confirmed 時有值。
-    """
+    """瀏覽器輪詢用：回傳 (status, username)"""
     data = _load()
     record = data.get(token_id)
     if not record:

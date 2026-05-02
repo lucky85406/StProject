@@ -5,9 +5,10 @@ import logging
 import sys
 import platform
 
+from httpx import get
 import streamlit as st
 
-from core.users import change_password
+from core.users import change_password,get_user_id
 from core.expense_db import (
     get_budget,
     update_budget,
@@ -157,8 +158,8 @@ def _tab_general() -> None:
 
 def _tab_budget() -> None:
     """每日預算上限設定與啟用/停用切換。"""
-
-    budget = get_budget()
+    user_id = get_user_id(st.session_state.get("username"))
+    budget = get_budget(user_id)
 
     # ── 目前狀態卡片 ──────────────────────────────────────────────
     with st.container(border=True):
@@ -258,8 +259,8 @@ def _render_icon_picker(form_key: str) -> str:
 
 def _tab_categories() -> None:
     """類別管理：預設類別展示 + 新增自訂類別 + 刪除自訂類別。"""
-
-    categories = get_all_categories()
+    user_id = get_user_id(st.session_state.get("username"))
+    categories = get_all_categories(user_id)
     default_cats = [c for c in categories if c.is_default]
     custom_cats = [c for c in categories if not c.is_default]
 
@@ -384,6 +385,79 @@ def _tab_categories() -> None:
                 else:
                     st.error(f"❌ 新增失敗，「{name_clean}」可能已存在。")
 
+# pages/settings.py — 新增設備管理段落（加在既有設定頁末尾）
+
+
+def _show_device_management(username: str) -> None:
+    from core.device_auth import (
+        compute_device_hash,
+        has_any_device,
+        list_devices,
+        register_device,
+        revoke_device,
+    )
+
+    st.subheader("📱 QR 登入設備管理")
+    st.caption("綁定後，掃描 QR Code 只需輸入帳號即可登入，無需密碼。")
+
+    # ── 已綁定設備列表 ────────────────────────────────────────────
+    devices: list[dict] = list_devices(username)
+    if devices:
+        for dev in devices:
+            col_label, col_time, col_btn = st.columns([3, 3, 1])
+            with col_label:
+                st.markdown(f"📲 **{dev['device_label']}**")
+            with col_time:
+                last = dev.get("last_used_at") or "從未使用"
+                st.caption(f"最後使用：{str(last)[:19]}")
+            with col_btn:
+                if st.button("撤銷", key=f"revoke_{dev['id']}", type="secondary"):
+                    if revoke_device(dev["id"], username):
+                        st.success("✅ 設備已撤銷")
+                        st.rerun()
+                    else:
+                        st.error("❌ 撤銷失敗")
+    else:
+        st.info("目前尚未綁定任何設備。")
+
+    st.divider()
+
+    # ── 綁定當前設備 ─────────────────────────────────────────────
+    st.markdown("**綁定目前使用的設備**")
+
+    # ✅ 改用 st.context.headers，伺服器端直接讀取，無 JS 時序問題
+    _headers = st.context.headers
+    _ua = _headers.get("User-Agent", "")
+    _lang = _headers.get("Accept-Language", "")
+    _fp_raw = f"{_ua}|{_lang}"
+
+    # 顯示偵測到的設備資訊（方便使用者確認）
+    if _ua:
+        st.caption(f"🔍 偵測到：`{_ua[:80]}{'…' if len(_ua) > 80 else ''}`")
+
+    _label: str = st.text_input(
+        "設備名稱",
+        placeholder="例：iPhone 16 Pro / 辦公室 MacBook",
+        max_chars=50,
+        key="device_label_input",
+    )
+
+    if st.button("➕ 綁定此設備", type="primary", key="bind_device_btn"):
+        if not _fp_raw or len(_fp_raw) < 10:
+            st.error("❌ 無法取得設備資訊，請確認瀏覽器未封鎖 User-Agent。")
+        elif not _label.strip():
+            st.warning("⚠️ 請輸入設備名稱。")
+        else:
+            _hash = compute_device_hash(_fp_raw)
+            ok, reason = register_device(username, _hash, _label.strip())
+            if ok:
+                st.success(f"✅ 設備「{_label}」已成功綁定！")
+                st.rerun()
+            elif reason == "already_bound":
+                st.info("ℹ️ 此設備已綁定至您的帳號。")
+            else:
+                st.error("❌ 綁定失敗，請稍後再試。")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  頁面主函式
@@ -393,11 +467,12 @@ def _tab_categories() -> None:
 def show() -> None:
     logger.info("渲染設定頁 ─ user=%s", st.session_state.get("username"))
 
-    tab_general, tab_budget, tab_categories = st.tabs(
+    tab_general, tab_budget, tab_categories, tab_device = st.tabs(
         [
             "⚙️ 一般設定",
             "💰 每日預算",
             "🏷️ 類別管理",
+            "📱 行動設備註冊",
         ]
     )
 
@@ -409,5 +484,8 @@ def show() -> None:
 
     with tab_categories:
         _tab_categories()
+
+    with tab_device:
+        _show_device_management(st.session_state.get("username"))
 
     logger.info("設定頁渲染完成")
