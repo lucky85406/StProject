@@ -1,6 +1,8 @@
 # ⚙️ .streamlit/ — Streamlit 執行設定
 
-本目錄包含 Streamlit 的伺服器行為設定與敏感憑證設定，**不應提交至版本控制系統（.gitignore）**。
+本目錄包含 Streamlit 的伺服器行為設定與敏感憑證設定。
+
+> ⚠️ `secrets.toml` **不應提交至版本控制系統（加入 `.gitignore`）**
 
 ---
 
@@ -23,11 +25,10 @@
 # 關閉使用統計回傳（提升冷啟動速度）
 gatherUsageStats = false
 
-# 檔案變更時自動重新載入（開發模式）
+# 檔案變更時是否自動重新載入（開發模式建議開啟）
 runOnSave = false
 
 [browser]
-# 啟動後不自動開啟瀏覽器
 serverAddress = "localhost"
 gatherUsageStats = false
 
@@ -36,7 +37,7 @@ gatherUsageStats = false
 base = "light"
 ```
 
-> 本專案透過 `GLOBAL_CSS` 注入大量自訂樣式，`[theme]` 區塊的設定僅作為 Streamlit 元件的基礎色調底板。
+> 本專案透過 `app.py` 的 `GLOBAL_CSS` 注入大量自訂樣式（薰衣草紫 → 玫瑰粉漸層主題），`[theme]` 區塊僅作為 Streamlit 元件的基礎色調底板。
 
 ---
 
@@ -73,9 +74,9 @@ key = st.secrets["supabase"]["service_key"]
 
 ---
 
-## 🗄️ Supabase 資料表建立
+## 🗄️ Supabase 資料表建立 DDL
 
-首次部署前，需在 Supabase 建立以下資料表：
+首次部署前，需在 Supabase SQL Editor 執行以下建表語句：
 
 ### `users` 資料表
 
@@ -83,27 +84,16 @@ key = st.secrets["supabase"]["service_key"]
 CREATE TABLE users (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username      TEXT UNIQUE NOT NULL,
-    password      TEXT NOT NULL,           -- bcrypt hash
+    password      TEXT NOT NULL,           -- bcrypt hash (rounds=12)
     totp_enabled  BOOLEAN DEFAULT FALSE,
-    totp_secret   TEXT,                    -- Base32 TOTP 秘鑰
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-```
-
-### `expenses` 資料表
-
-```sql
-CREATE TABLE expenses (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    amount        NUMERIC(10, 2) NOT NULL,
-    category_id   UUID REFERENCES categories(id),
-    recorded_at   TIMESTAMPTZ DEFAULT NOW(),
-    note          TEXT,
+    totp_secret   TEXT,                    -- Base32 TOTP 秘鑰（NULL 表示未啟用）
     created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 ```
 
 ### `categories` 資料表
+
+> ⚠️ `user_id` 為可為 NULL 的欄位：`NULL` 表示全域預設類別，有值表示使用者自訂類別。
 
 ```sql
 CREATE TABLE categories (
@@ -112,8 +102,29 @@ CREATE TABLE categories (
     icon          TEXT DEFAULT '📦',
     is_default    BOOLEAN DEFAULT FALSE,
     sort_order    INT DEFAULT 100,
+    user_id       UUID REFERENCES users(id) ON DELETE CASCADE,  -- NULL = 全域預設
     created_at    TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- 建議索引（加速依使用者查詢）
+CREATE INDEX idx_categories_user_id ON categories(user_id);
+```
+
+### `expenses` 資料表
+
+```sql
+CREATE TABLE expenses (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    amount        NUMERIC(10, 2) NOT NULL CHECK (amount > 0),
+    category_id   UUID REFERENCES categories(id) ON DELETE SET NULL,
+    recorded_at   TIMESTAMPTZ DEFAULT NOW(),
+    note          TEXT,
+    user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 建議索引（加速依使用者 + 日期查詢）
+CREATE INDEX idx_expenses_user_date ON expenses(user_id, recorded_at DESC);
 ```
 
 ### `budget_settings` 資料表
@@ -121,10 +132,28 @@ CREATE TABLE categories (
 ```sql
 CREATE TABLE budget_settings (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    daily_limit   NUMERIC(10, 2) NOT NULL,
+    daily_limit   NUMERIC(10, 2) NOT NULL CHECK (daily_limit > 0),
     is_active     BOOLEAN DEFAULT TRUE,
+    user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     updated_at    TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- 建議索引（每位使用者通常只有一筆有效預算）
+CREATE UNIQUE INDEX idx_budget_user_active ON budget_settings(user_id) WHERE is_active = TRUE;
+```
+
+### 預設類別種子資料（選用）
+
+```sql
+-- 插入全域預設類別（user_id 為 NULL）
+INSERT INTO categories (name, icon, is_default, sort_order, user_id) VALUES
+    ('餐飲',   '🍜', TRUE, 10, NULL),
+    ('交通',   '🚇', TRUE, 20, NULL),
+    ('購物',   '🛍', TRUE, 30, NULL),
+    ('娛樂',   '🎮', TRUE, 40, NULL),
+    ('醫療',   '💊', TRUE, 50, NULL),
+    ('住宿',   '🏠', TRUE, 60, NULL),
+    ('其他',   '📦', TRUE, 99, NULL);
 ```
 
 ---
@@ -135,14 +164,17 @@ CREATE TABLE budget_settings (
 # 本機開發（預設 8501 port）
 uv run streamlit run app.py
 
-# 指定 port 並對外開放（區域網路分享）
+# 指定 port 並對外開放（區域網路分享 / QR Code 登入需要區域網路 IP）
 uv run streamlit run app.py --server.address=0.0.0.0 --server.port=8501
 
-# 關閉開發者工具列（正式部署）
-uv run streamlit run app.py --server.address=0.0.0.0 \
-                             --server.port=8501 \
-                             --server.headless=true
+# 正式部署（關閉開發者工具列、Headless 模式）
+uv run streamlit run app.py \
+    --server.address=0.0.0.0 \
+    --server.port=8501 \
+    --server.headless=true
 ```
+
+> **QR Code 登入注意**：此功能仰賴 `core/network.get_local_ip()` 取得區域網路 IP 來建構確認 URL。若要讓手機掃碼可正常確認，應用程式必須以 `--server.address=0.0.0.0` 對外開放，且手機與伺服器在同一區域網路內。
 
 ---
 
@@ -154,7 +186,7 @@ uv run streamlit run app.py --server.address=0.0.0.0 \
 # Streamlit 敏感設定
 .streamlit/secrets.toml
 
-# QR Token 暫存檔
+# QR Token 暫存檔（qr_store.py 使用）
 .qr_store.json
 
 # Python
@@ -164,4 +196,7 @@ __pycache__/
 
 # uv
 .python-version
+
+# OpenCV DNN 模型快取（體積較大）
+models/
 ```

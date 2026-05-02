@@ -1,6 +1,8 @@
 # 🧩 core/ — 核心業務邏輯模組
 
-本目錄包含 StProject 所有共用核心邏輯，涵蓋資料庫連線、身份驗證、Session 管理、TOTP、QR 登入與消費記錄資料存取層。所有模組均採用標準 Python logging，不直接依賴 Streamlit，可獨立測試。
+本目錄包含 StProject 所有共用核心邏輯，涵蓋資料庫連線、身份驗證、Session 管理、TOTP、QR 登入與消費記錄資料存取層。
+
+> **設計原則**：所有模組均採用標準 Python `logging`，**不直接依賴 Streamlit**，可獨立進行單元測試。
 
 ---
 
@@ -10,12 +12,12 @@
 core/
 ├── auth.py           # Auth 公開介面（re-export session_store）
 ├── db.py             # Supabase 連線工廠（lru_cache 單例）
-├── expense_db.py     # 消費記錄資料存取層（DAL）
+├── expense_db.py     # 消費記錄 DAL（v2：user_id 多使用者隔離）
 ├── network.py        # 網路工具（取得本機 IP）
 ├── qr_login.py       # QR Code 圖片產生與確認 URL 建構
 ├── qr_store.py       # QR Token 狀態機（JSON 檔案儲存）
 ├── session_store.py  # 登入 Session 建立 / 驗證 / 刪除
-├── totp.py           # Google Authenticator TOTP 工具
+├── totp.py           # Google Authenticator TOTP 工具（RFC 6238）
 └── users.py          # 使用者帳號驗證與管理
 ```
 
@@ -31,9 +33,11 @@ from core.db import get_client
 client = get_client()  # 回傳快取的 supabase.Client
 ```
 
+**實作細節**：
 - 使用 `@lru_cache(maxsize=1)` 確保連線不重複建立
 - 憑證從 `st.secrets["supabase"]` 讀取（`.streamlit/secrets.toml`）
-- 使用 `service_role` key，繞過 Row Level Security（RLS），適合伺服器端操作
+- 使用 **service_role** key，繞過 Row Level Security（RLS），適合伺服器端操作
+- Supabase Python Client 為執行緒安全，在 Streamlit 多執行緒環境下可正常運作
 
 ### 必要 Secrets 設定
 
@@ -52,16 +56,17 @@ service_key = "eyJ..."
 
 ### 主要函式
 
-| 函式 | 說明 |
-|------|------|
-| `verify_login(username, password, totp_code)` | 統一登入驗證入口，回傳 `(bool, LoginReason)` |
-| `verify_password(username, password)` | 僅驗證密碼（bcrypt checkpw） |
-| `user_exists(username)` | 確認使用者是否存在（QR 登入用） |
-| `create_user(username, password)` | 新增使用者，TOTP 預設停用 |
-| `change_password(username, old_pw, new_pw)` | 修改密碼（驗證舊密碼後 bcrypt 重新 Hash） |
-| `get_totp_info(username)` | 取得 `(totp_enabled, totp_secret)` |
-| `save_totp_secret(username, secret)` | 儲存 TOTP 秘鑰並啟用 |
-| `disable_totp(username)` | 停用 TOTP，清除 secret |
+| 函式 | 回傳值 | 說明 |
+|------|--------|------|
+| `verify_login(username, password, totp_code)` | `tuple[bool, LoginReason]` | 統一登入驗證入口 |
+| `verify_password(username, password)` | `bool` | 僅驗證密碼（bcrypt checkpw） |
+| `user_exists(username)` | `bool` | 確認使用者是否存在（QR 登入用） |
+| `get_user_id(username)` | `str \| None` | 取得使用者 UUID（消費記錄隔離用） |
+| `create_user(username, password)` | `bool` | 新增使用者，TOTP 預設停用 |
+| `change_password(username, old_pw, new_pw)` | `bool` | 修改密碼（驗證舊密碼後 bcrypt 重新 Hash） |
+| `get_totp_info(username)` | `tuple[bool, str \| None]` | 取得 `(totp_enabled, totp_secret)` |
+| `save_totp_secret(username, secret)` | `bool` | 儲存 TOTP 秘鑰並啟用 |
+| `disable_totp(username)` | `bool` | 停用 TOTP，清除 secret |
 
 ### 登入驗證流程
 
@@ -69,7 +74,9 @@ service_key = "eyJ..."
 verify_login(username, password, totp_code)
     ├─ Step 1: bcrypt.checkpw(password, stored_hash)
     │       └─ 失敗 → return (False, "wrong_password")
-    ├─ Step 2: totp_enabled 檢查
+    ├─ Step 2: 使用者存在確認
+    │       └─ 不存在 → return (False, "not_found")
+    ├─ Step 3: totp_enabled 檢查
     │       ├─ True + totp_code 為空 → return (False, "totp_required")
     │       ├─ True + 驗證失敗 → return (False, "wrong_totp")
     │       └─ False → 跳過 TOTP 驗證
@@ -86,28 +93,36 @@ LoginReason = Literal["ok", "wrong_password", "totp_required", "wrong_totp", "no
 
 | 欄位 | 型別 | 說明 |
 |------|------|------|
+| `id` | uuid | 主鍵（`gen_random_uuid()`） |
 | `username` | text | 唯一帳號名稱 |
 | `password` | text | bcrypt hash（rounds=12） |
 | `totp_enabled` | bool | 是否已啟用 TOTP（預設 False） |
 | `totp_secret` | text | Base32 TOTP 秘鑰（可為 NULL） |
+| `created_at` | timestamptz | 建立時間 |
+
+> **安全設計**：登入失敗時一律回傳模糊錯誤訊息，防止帳號枚舉攻擊（Account Enumeration）。
 
 ---
 
 ## 🔑 session_store.py — Session 管理
 
-管理登入後的使用者 Session，透過 URL Query Param `?sid=` 保留登入狀態（無 Cookie 依賴）。
+管理登入後的使用者 Session，透過 URL Query Param `?sid=` 保留登入狀態，**無需 Cookie**。
 
 ### 主要函式
 
-| 函式 | 說明 |
-|------|------|
-| `create_session(username)` | 建立 Session，回傳 UUID sid |
-| `verify_session(sid)` | 驗證 sid 是否有效，回傳 username 或 None |
-| `delete_session(sid)` | 刪除 Session（登出用） |
+| 函式 | 回傳值 | 說明 |
+|------|--------|------|
+| `create_session(username)` | `str` | 建立 Session，回傳 UUID sid |
+| `verify_session(sid)` | `str \| None` | 驗證 sid 是否有效，回傳 username 或 None |
+| `delete_session(sid)` | `None` | 刪除 Session（登出用） |
 
-### auth.py
+### Session 恢復機制
 
-`core/auth.py` 為 Session 相關函式的公開介面模組，直接 re-export `session_store` 的函式，方便統一 import 路徑：
+`app.py` 啟動時自動從 `st.query_params["sid"]` 讀取並呼叫 `verify_session()`，實現頁面重整後保持登入狀態。
+
+### auth.py — 公開介面
+
+`core/auth.py` 直接 re-export `session_store` 的函式，統一 import 路徑：
 
 ```python
 from core.auth import create_session, verify_session, delete_session
@@ -124,120 +139,121 @@ from core.auth import create_session, verify_session, delete_session
 | 函式 | 說明 |
 |------|------|
 | `generate_secret()` | 產生 32 字元 Base32 隨機秘鑰 |
-| `get_provisioning_uri(secret, username)` | 產生 `otpauth://` URI |
-| `generate_setup_qr_png(secret, username)` | 產生設定用 QR Code（PNG bytes） |
-| `verify_code(secret, code)` | 驗證 6 位數 TOTP 碼（允許 ±30 秒時鐘漂移） |
+| `get_provisioning_uri(secret, username)` | 產生 `otpauth://totp/...` URI |
+| `generate_setup_qr_png(secret, username)` | 產生供掃描的 QR Code PNG（bytes） |
+| `verify_code(secret, code)` | 驗證 6 位數碼（含 ±30 秒容差） |
 
-### 使用範例
+### TOTP Enrollment 強制閘門
 
-```python
-from core.totp import generate_secret, generate_setup_qr_png, verify_code
-
-# 產生秘鑰與 QR
-secret = generate_secret()
-qr_png = generate_setup_qr_png(secret, "admin")
-
-# 驗證使用者輸入
-is_valid = verify_code(secret, "123456")
-```
+首次登入（密碼正確但 `totp_enabled=False`）時，`app.py` 會**強制顯示 TOTP 設定頁面**，在使用者完成 Google Authenticator 設定並驗證成功前，不會建立 Session。此機制同時適用於帳號密碼登入和 QR Code 登入兩種方式。
 
 ---
 
-## 📱 qr_store.py — QR Token 狀態機
+## 📱 qr_login.py — QR Code 圖片產生
 
-管理 QR Code 登入的 Token 生命週期，採本機 JSON 檔案儲存（`.qr_store.json`），適合單機部署。
+負責 QR Code 登入的圖片渲染與確認 URL 建構。
 
-### Token 狀態機
+### 主要函式
+
+| 函式 | 說明 |
+|------|------|
+| `generate_qr_image(data)` | 將字串資料渲染為 QR Code PNG（bytes） |
+| `build_confirm_url(token_id, username, base_url)` | 建構手機端掃碼確認的完整 URL |
+
+---
+
+## 🎫 qr_store.py — QR Token 狀態機
+
+管理 QR Code 登入的 Token 生命週期，使用本機 JSON 檔案（`.qr_store.json`）儲存狀態。
+
+### Token 狀態流程
 
 ```
 create_qr_token()
-    └─→ status: "pending"
-            │
-            ├─ 手機掃描並確認 → confirm_qr_token()
-            │       └─→ status: "confirmed"
-            │               └─ 瀏覽器輪詢偵測 → check_qr_token()
-            │                       └─ 登入成功 → consume_qr_token()（清除）
-            │
-            └─ 超過 120 秒 → 自動視為 "expired"
+    → status: "pending"
+    → 手機掃碼
+confirm_qr_token(token_id, username)
+    → status: "confirmed"
+    → 桌面輪詢偵測
+consume_qr_token(token_id)
+    → Token 消費（防重放攻擊）
+    → 建立正式 Session
+check_qr_token(token_id)
+    → "pending" | "confirmed" | "expired"
 ```
 
 ### 主要函式
 
-| 函式 | 說明 |
-|------|------|
-| `create_qr_token()` | 建立新 Token，回傳 token_id（UUID） |
-| `confirm_qr_token(token_id, username)` | 手機端確認（綁定 username） |
-| `check_qr_token(token_id)` | 瀏覽器輪詢用，回傳 `(QrStatus, username)` |
-| `consume_qr_token(token_id)` | 登入成功後清除 Token（防重用） |
+| 函式 | 回傳值 | 說明 |
+|------|--------|------|
+| `create_qr_token()` | `str` | 建立新 Token，回傳 token_id |
+| `check_qr_token(token_id)` | `tuple[str, str \| None]` | 查詢狀態，回傳 `(status, confirmed_user)` |
+| `confirm_qr_token(token_id, username)` | `bool` | 手機端確認，寫入 username |
+| `consume_qr_token(token_id)` | `bool` | 消費 Token（建立 Session 前呼叫） |
 
-### QrStatus 型別
+### 輪詢機制
 
-```python
-QrStatus = Literal["pending", "confirmed", "expired"]
-```
+桌面端使用 `@st.fragment(run_every=3)` 每 3 秒自動呼叫 `check_qr_token()`，偵測到 `"confirmed"` 狀態後透過 `st.rerun(scope="app")` 執行整頁跳轉。
 
----
-
-## 🔗 qr_login.py — QR 登入輔助工具
-
-負責產生可掃描的 QR Code 圖片，以及建構手機端確認頁面 URL。
-
-### 主要函式
-
-| 函式 | 說明 |
-|------|------|
-| `generate_qr_image(url)` | 將 URL 轉為 QR Code PNG bytes |
-| `build_confirm_url(token_id, port)` | 建構手機端確認 URL（含 `?qr_confirm=token_id`） |
+> ⚠️ **部署限制**：JSON 檔案儲存僅適合**單機部署**。多實例水平擴展時，應將 Token 儲存改為 Supabase 資料表或 Redis。
 
 ---
 
 ## 🌐 network.py — 網路工具
 
-```python
-from core.network import get_local_ip
-
-ip = get_local_ip()  # e.g., "192.168.1.100"
-```
-
-取得本機區域網路 IP，用於在側邊欄顯示內網服務位址與產生 QR Code URL。
+| 函式 | 說明 |
+|------|------|
+| `get_local_ip()` | 取得本機區域網路 IP（QR Code 確認 URL 建構用） |
 
 ---
 
-## 💳 expense_db.py — 消費記錄資料存取層
+## 💳 expense_db.py — 消費記錄資料存取層（v2）
+
+> **v2 重大更新**：所有查詢依 `user_id`（UUID）隔離，支援多使用者各自獨立的消費記錄、類別與預算設定。
 
 頁面層（`pages/daily_expense.py`）的所有 Supabase 操作均集中於此，實現關注點分離。
 
 ### 資料類別（dataclass）
 
-| 類別 | 欄位 | 說明 |
-|------|------|------|
-| `Category` | id, name, icon, is_default, sort_order | 消費類別 |
-| `Expense` | id, amount, category_id/name/icon, recorded_at, note, created_at | 消費記錄 |
-| `BudgetSetting` | id, daily_limit, is_active, updated_at | 預算設定 |
-| `TodaySummary` | total, expenses, is_over_budget, budget_limit | 今日彙總（計算型） |
+| 類別 | 主要欄位 | 說明 |
+|------|----------|------|
+| `Category` | `id, name, icon, is_default, sort_order` | 消費類別 |
+| `Expense` | `id, amount, category_id, category_name, category_icon, recorded_at, note, created_at` | 消費記錄 |
+| `BudgetSetting` | `id, daily_limit, is_active, updated_at` | 預算設定 |
+| `TodaySummary` | `total, expenses, is_over_budget, budget_limit` | 今日彙總（計算型，非資料庫實體） |
 
 ### 主要函式
 
 **類別管理**
-- `get_all_categories()` → `list[Category]`
-- `add_category(name, icon)` → `bool`
-- `delete_category(category_id)` → `bool`（預設類別不可刪除）
+
+| 函式 | 說明 |
+|------|------|
+| `get_all_categories(user_id)` | 全域預設類別（`is_default=True, user_id IS NULL`）+ 使用者自訂類別，依 `sort_order` 排序 |
+| `add_category(user_id, name, icon)` | 新增使用者自訂類別（名稱重複或超過 20 字時回傳 `False`） |
+| `delete_category(user_id, category_id)` | 刪除類別（`is_default=True` 或非本人類別時拒絕） |
 
 **消費記錄**
-- `add_expense(amount, category_id, recorded_at, note)` → `str | None`（回傳新建 id）
-- `get_expenses_by_date(target_date)` → `list[Expense]`
-- `delete_expense(expense_id)` → `bool`
+
+| 函式 | 說明 |
+|------|------|
+| `add_expense(user_id, amount, category_id, recorded_at, note)` | 新增消費記錄，回傳新建 `id`（`str \| None`） |
+| `get_expenses_by_date(user_id, target_date)` | 取得指定日期的消費清單 |
+| `delete_expense(user_id, expense_id)` | 刪除消費記錄（驗證 `user_id` 確保只能刪自己的資料） |
 
 **預算設定**
-- `get_budget()` → `BudgetSetting | None`
-- `update_budget(daily_limit, is_active)` → `bool`（upsert 語意）
+
+| 函式 | 說明 |
+|------|------|
+| `get_budget(user_id)` | 取得當前有效預算設定，回傳 `BudgetSetting \| None` |
+| `update_budget(user_id, daily_limit, is_active)` | 更新預算（upsert 語意，不存在時自動建立） |
 
 ### 防呆機制
 
-- 金額 ≤ 0 時拒絕新增，記錄 Warning log
+- 金額 ≤ 0 時拒絕新增，記錄 `WARNING` log
 - 不允許新增「未來時間」的消費記錄
-- 備註超過 200 字自動截斷
-- 刪除預設類別時回傳 False 並記錄警告
+- 備註超過 200 字時自動截斷並記錄 `WARNING`
+- 刪除預設類別或他人類別時回傳 `False` 並記錄警告
+- 類別名稱空字串或超過 20 字時拒絕新增
 
 ---
 
@@ -245,20 +261,27 @@ ip = get_local_ip()  # e.g., "192.168.1.100"
 
 ```
 app.py
-  ├─ core.auth          → core.session_store
-  ├─ core.users         → core.db, core.totp
-  ├─ core.qr_store      （無外部依賴）
-  └─ core.qr_login      → core.network
+  ├─ core.auth           → core.session_store
+  ├─ core.users          → core.db, core.totp
+  ├─ core.qr_store       （無外部依賴）
+  └─ core.qr_login       → core.network
 
 pages/daily_expense.py
-  └─ core.expense_db    → core.db
+  └─ core.expense_db     → core.db
+
+pages/settings.py
+  ├─ core.users          → core.db, core.totp
+  └─ core.session_store
 ```
 
 ---
 
 ## ⚠️ 注意事項
 
-- `db.py` 的 `get_client()` 使用 `lru_cache`，在 Streamlit 多執行緒環境下需確認執行緒安全性（目前 Supabase Python Client 為執行緒安全）。
-- `qr_store.py` 使用本機 JSON 檔案，**不適合多實例水平擴展部署**。如需多機部署，應將 Token 存入 Supabase 或 Redis。
-- `session_store.py` 的 Session 儲存機制請確認與部署環境相容（單機適用）。
-- 所有含敏感資訊的函式（密碼驗證失敗、TOTP 錯誤）均以模糊錯誤訊息對外回傳，防止帳號枚舉攻擊。
+| 項目 | 說明 |
+|------|------|
+| `db.py` lru_cache | Supabase Python Client 為執行緒安全，Streamlit 多執行緒環境下可正常使用 |
+| `qr_store.py` | JSON 檔案儲存僅適合單機部署；多機部署應改用 Supabase 或 Redis |
+| `session_store.py` | Session 儲存機制確認與部署環境相容（預設為單機適用） |
+| 錯誤訊息 | 所有含敏感操作（密碼驗證失敗、TOTP 錯誤）均以模糊錯誤回傳，防止帳號枚舉攻擊 |
+| `expense_db.py` v2 | 所有函式均需傳入 `user_id`，升級自舊版時需更新所有呼叫點 |
