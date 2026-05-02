@@ -201,6 +201,7 @@ def _tab_budget() -> None:
         from decimal import Decimal
 
         ok = update_budget(
+            user_id=get_user_id(st.session_state.get("username")),
             daily_limit=Decimal(str(new_limit)),
             is_active=new_active,
         )

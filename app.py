@@ -57,7 +57,7 @@ def log_section(title: str) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="StProject",
+    page_title="Bllln Web",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -575,15 +575,15 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
                 '<div style="font-size:2rem">📱</div>'
                 '<div style="font-size:1.2rem;font-weight:800;color:#3b3552">QR Code 登入確認</div>'
                 '<div style="font-size:.85rem;color:#8b85a8;margin-top:.3rem">'
-                '請輸入您的帳號，系統將自動驗證此設備</div>'
-                '</div>',
+                "請輸入您的帳號，系統將自動驗證此設備</div>"
+                "</div>",
                 unsafe_allow_html=True,
             )
 
             # ── 從 HTTP headers 收集設備指紋（伺服器端，無 JS 時序問題）──
             _headers = st.context.headers
-            _ua    = _headers.get("User-Agent", "")
-            _lang  = _headers.get("Accept-Language", "")
+            _ua = _headers.get("User-Agent", "")
+            _lang = _headers.get("Accept-Language", "")
             _fp_raw = f"{_ua}|{_lang}"
 
             _qr_username: str = st.text_input(
@@ -622,7 +622,8 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
                     if not verify_device(_uname, _device_hash):
                         logger.warning(
                             "QR 設備登入失敗 ─ 設備未綁定  user=%s  hash=%s…",
-                            _uname, _device_hash[:8],
+                            _uname,
+                            _device_hash[:8],
                         )
                         st.error(
                             "❌ 此設備尚未綁定至您的帳號，"
@@ -634,7 +635,8 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
                             st.session_state.qr_mobile_user = _uname
                             logger.info(
                                 "QR 設備登入確認成功 ─ user=%s  token=%s",
-                                _uname, _qr_confirm_token[:8] + "…",
+                                _uname,
+                                _qr_confirm_token[:8] + "…",
                             )
                             st.rerun()
                         else:
@@ -737,6 +739,7 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
         </html>"""
 
         import streamlit.components.v1 as components
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             components.html(_success_html, height=420, scrolling=False)
@@ -879,7 +882,7 @@ def _show_totp_enrollment() -> None:
                 # 驗證通過 → 儲存 secret，建立 session，進入 App
                 if save_totp_secret(enrolling_user, secret):
                     sid = create_session(enrolling_user)
-                    user_id  = get_user_id(enrolling_user)  # ← 新增
+                    user_id = get_user_id(enrolling_user)  # ← 新增
                     st.session_state.update(
                         logged_in=True,
                         username=enrolling_user,
@@ -923,7 +926,7 @@ def show_login() -> None:
             """
             <div class="login-logo">
                 <span class="login-logo-icon">⚡</span>
-                <div class="login-title">StProject</div>
+                <div class="login-title">Bllln Web</div>
                 <div class="login-sub">Powered by Streamlit &amp; uv</div>
             </div>
             """,
@@ -981,11 +984,6 @@ def show_login() -> None:
                     }
                     logger.warning("登入失敗 ─ user=%s  reason=%s", username, reason)
                     st.error(_LOGIN_ERRORS.get(reason, "登入失敗，請稍後再試。"))
-
-            st.markdown(
-                "<div class='login-hint'>測試帳號：admin / admin123 　或　 user / user123</div>",
-                unsafe_allow_html=True,
-            )
         # ── Tab 2：QR Code 登入 ──────────────────────────────────
         with tab_qr:
             _show_qr_login_tab()
@@ -1033,6 +1031,7 @@ def _show_qr_login_tab() -> None:
         # ✅ 確認成功 → 寫入 session_state，設定 flag
         if status == "confirmed" and confirmed_user:
             from core.users import get_totp_info
+
             totp_enabled, _ = get_totp_info(confirmed_user)
             consume_qr_token(token_id)
 
@@ -1133,7 +1132,7 @@ PAGE_CONFIG: list[dict[str, Any]] = [
         "icon": "🏠",
         "label": "首頁",
         "title": "系統首頁",
-        "subtitle": "歡迎使用 StProject 管理平台",
+        "subtitle": "歡迎使用 Bllln Web 管理平台",
         "module": "pages.home",
         "params": [],  # 首頁無側邊欄參數
     },
@@ -1403,7 +1402,7 @@ def render_sidebar(active_id: str) -> str:
             <div class="sb-brand">
                 <span class="sb-brand-icon">⚡</span>
                 <div>
-                    <div class="sb-brand-text">StProject</div>
+                    <div class="sb-brand-text">Bllln Web</div>
                     <div class="sb-brand-sub">v1.0.0 · uv workspace</div>
                 </div>
             </div>
@@ -1542,7 +1541,7 @@ def render_footer() -> None:
                 <span class="footer-dot"></span>
                 <span>Designed by <strong style="color:var(--accent)">Bllln</strong></span>
                 <span class="footer-dot"></span>
-                <span>StProject © 2026</span>
+                <span>Bllln Web © 2026</span>
             </div>
             <div class="footer-right">
                 <span class="footer-badge">📅 {today}</span>
