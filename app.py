@@ -213,6 +213,9 @@ header[data-testid="stHeader"] {
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────── */
+div[data-testid="stSidebarUserContent"] {
+    margin:0px 0.2rem !important;
+}
 [data-testid="stSidebar"] {
     background: var(--grad-sidebar) !important;
     border-right: 1px solid var(--border) !important;
@@ -258,7 +261,7 @@ header[data-testid="stHeader"] {
     border: 1px solid rgba(124,111,247,0.18);
     border-radius: 999px;
     padding: 6px 12px 6px 8px;
-    margin: 0.8rem 1.2rem;
+    margin: 1.2rem 1.2rem;
 }
 .sb-user-avatar {
     width: 26px; height: 26px;
@@ -419,31 +422,6 @@ div[data-testid="stButton"] > button:hover {
     box-shadow: 0 4px 14px rgba(124,111,247,0.14) !important;
 }
 
-/* ── Sidebar 導覽按鈕（type=primary）─────────────────────────────── */
-[data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:hover {
-    transform: translateY(-5px) !important;
-    background: rgba(255,255,255,0.95) !important;
-    border-color: rgba(124,111,247,0.38) !important;
-    box-shadow:
-        0 6px 20px rgba(124,111,247,0.18),
-        0 2px 8px rgba(124,111,247,0.10),
-        inset 0 1px 0 rgba(255,255,255,0.80) !important;
-}
-/* 新增：點擊按下效果（回彈感） */
-[data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:active {
-    transform: translateY(-1px) !important;
-    box-shadow:
-        0 3px 10px rgba(124,111,247,0.14),
-        inset 0 1px 0 rgba(255,255,255,0.60) !important;
-    transition-duration: 0.08s !important;
-}
-/* ── 登出按鈕（type=secondary，與 user chip 同色系）────────────────── */
-[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover {
-    background: rgba(239,68,68,0.07) !important;
-    border-color: rgba(239,68,68,0.28) !important;
-    color: #ef4444 !important;
-}
-
 /* ── 表單元件 ────────────────────────────────────────────────────── */
 [data-testid="stSelectbox"] > div > div,
 [data-testid="stTextInput"] > div > div input,
@@ -512,6 +490,61 @@ p, li { color: #3b3552 !important; }
 </style>
 """
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  側邊欄導覽靜態樣式（Static Sidebar Nav CSS）
+#  ▸ 不含任何動態資訊（無 active_id、無 row/col 計算）
+#  ▸ 與 GLOBAL_CSS 同層級，在 show_main() 每次 re-run 時穩定注入
+#  ▸ _inject_sidebar_nav_style() 只負責注入 active 選擇器 + overflow JS
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SB = '[data-testid="stSidebar"]'
+_HB = '[data-testid="stHorizontalBlock"]'
+_COL = '[data-testid="stColumn"]'
+_BTN = 'button[data-testid="stBaseButton-secondary"]'
+_NAV_ALL = f"{_SB} {_HB}:not(:first-of-type) {_BTN}"
+_NAV_LOGOUT = f"{_SB} {_HB}:first-of-type {_BTN}"
+
+SIDEBAR_NAV_CSS: str = f"""
+<style>
+/* ── 排版與外觀（不含 box-shadow / transition，交由 JS 的 inline !important 處理）── */
+{_NAV_ALL} {{
+    background      : linear-gradient(160deg,
+                        #e6fdf6 0%, #f2faff 50%, #edf5ff 100%) !important;
+    border          : 1.5px solid rgba(29,158,117,0.28) !important;
+    border-radius   : 10px !important;
+    padding         : 10px 4px !important;
+    min-height      : 62px !important;
+    width           : 100% !important;
+    white-space     : pre-wrap !important;
+    line-height     : 1.4 !important;
+    font-size       : 0.75rem !important;
+    font-weight     : 600 !important;
+    color           : #0f6e56 !important;
+    display         : flex !important;
+    flex-direction  : column !important;
+    align-items     : center !important;
+    justify-content : center !important;
+    gap             : 3px !important;
+    position        : relative !important;
+    cursor          : pointer !important;
+}}
+
+/* ── 登出按鈕排版 ── */
+{_NAV_LOGOUT} {{
+    background    : rgba(124,111,247,0.07) !important;
+    border        : 1px solid rgba(124,111,247,0.20) !important;
+    border-radius : 15px !important;
+    color         : #7c6ff7 !important;
+    min-height    : 36px !important;
+    height        : 50px !important;
+    font-size     : 0.8rem !important;
+    font-weight   : 700 !important;
+    padding       : 0 16px !important;
+    flex-direction: row !important;
+    white-space   : nowrap !important;
+}}
+</style>
+"""
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Session 恢復（URL query param 保留 sid）
@@ -1482,194 +1515,167 @@ def render_page_hero(page_cfg: dict) -> None:
 
 def _inject_sidebar_nav_style(active_id: str) -> None:
     """
-    CSS 負責顏色與漸層，JS 負責 hover 浮起動效與 overflow 修正。
-    ⚠️ 必須在 mod.show() 之後呼叫。
+    【架構說明】
+    CSS (st.markdown)  → 排版 / 背景 / 邊框（SIDEBAR_NAV_CSS 常數）
+    CSS (st.markdown)  → active 按鈕高亮（此函式動態注入）
+    JS  (st.iframe)    → box-shadow 3D + transition + hover 動效
+                         全部用 setProperty('...','...','important')
+                         inline !important > 任何 stylesheet !important
+                         切頁後 React 若保留同一 DOM 節點，inline style 不消失
+                         若 React 替換節點，MutationObserver 重新套用
     """
     active_idx: int = next(
         (i for i, p in enumerate(PAGE_CONFIG) if p["id"] == active_id), 0
     )
     row_block: int = (active_idx // 3) + 2
-    col_pos: int = (active_idx % 3) + 1
+    col_pos:   int = (active_idx % 3) + 1
 
-    _sb = '[data-testid="stSidebar"]'
-    _hb = '[data-testid="stHorizontalBlock"]'
-    _col = '[data-testid="stColumn"]'
-    _btn = 'button[data-testid="stBaseButton-secondary"]'
-    _all_nav = f"{_sb} {_hb}:not(:first-of-type) {_btn}"
     _active = (
-        f"{_sb} {_hb}:nth-of-type({row_block}) " f"{_col}:nth-child({col_pos}) {_btn}"
+        f'{_SB} {_HB}:nth-of-type({row_block}) '
+        f'{_COL}:nth-child({col_pos}) {_BTN}'
     )
-    _logout = f"{_sb} {_hb}:first-of-type {_btn}"
 
-    css = f"""
-        {_all_nav} {{
-            background-image : linear-gradient(145deg,
-                #e0f7f3 0%, #f0f9ff 60%, #eef6ff 100%) !important;
-            border           : 1px solid rgba(29,158,117,0.20) !important;
-            border-radius    : 10px !important;
-            padding          : 10px 4px !important;
-            min-height       : 62px !important;
-            width            : 100% !important;
-            white-space      : pre-wrap !important;
-            line-height      : 1.4 !important;
-            font-size        : 0.75rem !important;
-            font-weight      : 600 !important;
-            color            : #0f6e56 !important;
-            display          : flex !important;
-            flex-direction   : column !important;
-            align-items      : center !important;
-            justify-content  : center !important;
-            gap              : 3px !important;
-            box-shadow       : 0 1px 4px rgba(29,158,117,0.08),
-                               inset 0 1px 0 rgba(255,255,255,0.80) !important;
-        }}
-        {_active} {{
-            background-image : linear-gradient(145deg,
-                #b8f0e8 0%, #d6f0ff 55%, #dceeff 100%) !important;
-            border           : 1px solid rgba(15,110,86,0.38) !important;
-            color            : #085041 !important;
-            font-weight      : 700 !important;
-            box-shadow       : 0 2px 12px rgba(29,158,117,0.22),
-                               inset 0 1px 0 rgba(255,255,255,0.90) !important;
-        }}
-        {_logout} {{
-            background-image : none !important;
-            background       : rgba(124,111,247,0.07) !important;
-            border           : 1px solid rgba(124,111,247,0.20) !important;
-            border-radius    : 999px !important;
-            color            : #7c6ff7 !important;
-            min-height       : 36px !important;
-            height           : 36px !important;
-            font-size        : 0.8rem !important;
-            font-weight      : 700 !important;
-            padding          : 0 16px !important;
-            flex-direction   : row !important;
-            white-space      : nowrap !important;
-            box-shadow       : none !important;
-        }}
-        {_logout}:hover {{
-            background       : rgba(239,68,68,0.07) !important;
-            border-color     : rgba(239,68,68,0.28) !important;
-            color            : #ef4444 !important;
-        }}
-    """
+    # ── ① Active 按鈕高亮 CSS（小型動態注入）
+    st.markdown(f"""
+    <style>
+    {_active} {{
+        background : linear-gradient(160deg,
+                        #bff0e8 0%, #d6f0ff 50%, #ddeeff 100%) !important;
+        border     : 1.5px solid rgba(15,110,86,0.42) !important;
+        color      : #085041 !important;
+        font-weight: 700 !important;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
 
-    escaped_css = css.replace("\\", "\\\\").replace("`", "\\`")
-
-    html = f"""
+    # ── ② JS：用 inline !important 設定 3D 陰影 + hover 動效
+    js = """
     <script>
-    (function() {{
-        var STYLE_ID = 'stproject-nav-css';
+    (function () {
 
-        /* ── 注入靜態 CSS（顏色、漸層）────────────────────── */
-        function injectCSS() {{
-            var ex = window.parent.document.getElementById(STYLE_ID);
-            if (ex) ex.remove();
-            var s = window.parent.document.createElement('style');
-            s.id = STYLE_ID;
-            s.textContent = `{escaped_css}`;
-            window.parent.document.head.appendChild(s);
-        }}
+        /* 基底 3D 陰影（inline !important，不被任何 stylesheet 覆蓋）*/
+        var BASE_SHADOW =
+            '0 4px 0 rgba(15,110,86,0.22),' +
+            '0 7px 18px rgba(29,158,117,0.12),' +
+            '0 1px 4px rgba(0,0,0,0.07),' +
+            'inset 0 1.5px 0 rgba(255,255,255,0.96),' +
+            'inset 0 -1.5px 0 rgba(29,158,117,0.14)';
 
-        /* ── 修正 overflow + 綁定 hover 動效 ──────────────── */
-        function setupButtons() {{
+        /* Hover 陰影 */
+        var HOVER_SHADOW =
+            '0 8px 0 rgba(15,110,86,0.18),' +
+            '0 16px 32px rgba(29,158,117,0.20),' +
+            '0 6px 12px rgba(29,158,117,0.12),' +
+            'inset 0 1.5px 0 rgba(255,255,255,0.98),' +
+            'inset 0 -1.5px 0 rgba(29,158,117,0.07)';
+
+        /* 按下陰影 */
+        var PRESS_SHADOW =
+            '0 1px 0 rgba(15,110,86,0.26),' +
+            '0 3px 8px rgba(29,158,117,0.10),' +
+            'inset 0 1.5px 0 rgba(255,255,255,0.88),' +
+            'inset 0 -1.5px 0 rgba(29,158,117,0.20)';
+
+        var TRANSITION_NORMAL =
+            'transform 0.28s cubic-bezier(0.22,1,0.36,1),' +
+            'box-shadow 0.28s cubic-bezier(0.22,1,0.36,1),' +
+            'filter 0.20s ease';
+
+        var TRANSITION_FAST =
+            'transform 0.07s cubic-bezier(0.22,1,0.36,1),' +
+            'box-shadow 0.07s cubic-bezier(0.22,1,0.36,1)';
+
+        /* 套用基底視覺（每次 setupButtons 都執行，修復切頁後 inline style 遺失）*/
+        function applyBase(btn) {
+            btn.style.setProperty('box-shadow',  BASE_SHADOW,       'important');
+            btn.style.setProperty('transition',  TRANSITION_NORMAL, 'important');
+            btn.style.setProperty('will-change', 'transform, box-shadow', 'important');
+            btn.style.setProperty('transform',   'translateY(0)',    'important');
+        }
+
+        /* overflow 修復：從按鈕向上走到 sidebar，確保 translateY 可見 */
+        function fixOverflow(btn) {
+            var sb   = window.parent.document
+                             .querySelector('[data-testid="stSidebar"]');
+            var node = btn.parentElement;
+            while (node && node !== sb) {
+                node.style.setProperty('overflow', 'visible', 'important');
+                node = node.parentElement;
+            }
+        }
+
+        function setupButtons() {
             var doc     = window.parent.document;
             var sidebar = doc.querySelector('[data-testid="stSidebar"]');
             if (!sidebar) return;
 
-            var hblocks = sidebar.querySelectorAll('[data-testid="stHorizontalBlock"]');
+            var hblocks = Array.from(
+                sidebar.querySelectorAll('[data-testid="stHorizontalBlock"]')
+            );
 
-            Array.from(hblocks).forEach(function(hb, idx) {{
-                if (idx === 0) return;   // 跳過 user/logout 列
+            hblocks.forEach(function (hb, idx) {
+                /*if (idx === 0) return; // 跳過登出列*/
 
-                /* 逐層解除 overflow 限制 */
-                hb.style.setProperty('overflow', 'visible', 'important');
-                hb.querySelectorAll('[data-testid="stColumn"]').forEach(function(col) {{
-                    col.style.setProperty('overflow', 'visible', 'important');
-                    var child = col.firstElementChild;
-                    while (child) {{
-                        child.style.setProperty('overflow', 'visible', 'important');
-                        child = child.firstElementChild;
-                    }}
-                }});
+                hb.querySelectorAll(
+                    'button[data-testid="stBaseButton-secondary"]'
+                ).forEach(function (btn) {
 
-                /* 對每顆按鈕綁定 JS hover */
-                hb.querySelectorAll('button[data-testid="stBaseButton-secondary"]')
-                  .forEach(function(btn) {{
+                    /* 每次都重設基底樣式（關鍵：修復切頁後 inline style 清除）*/
+                    fixOverflow(btn);
+                    applyBase(btn);
 
-                    /* 移除舊的 listener（防止重複綁定）*/
-                    if (btn._navHoverBound) return;
-                    btn._navHoverBound = true;
+                    /* 事件只綁一次 if (btn._navBound) return;*/
+                    
+                    btn._navBound = true;
 
-                    btn.style.transition =
-                        'transform 0.32s cubic-bezier(0.22,1,0.36,1),' +
-                        'box-shadow 0.32s cubic-bezier(0.22,1,0.36,1),' +
-                        'filter 0.22s ease-out';
-                    btn.style.willChange = 'transform, box-shadow';
+                    btn.addEventListener('mouseenter', function () {
+                        btn.style.setProperty('transform',  'translateY(-5px)', 'important');
+                        btn.style.setProperty('filter',     'brightness(1.05)', 'important');
+                        btn.style.setProperty('box-shadow', HOVER_SHADOW,       'important');
+                    });
 
-                    btn.addEventListener('mouseenter', function() {{
-                        btn.style.transform  = 'translateY(-5px)';
-                        btn.style.boxShadow  =
-                            '0 10px 28px rgba(29,158,117,0.18),' +
-                            '0 3px 8px rgba(29,158,117,0.10),' +
-                            'inset 0 1px 0 rgba(255,255,255,0.95)';
-                        btn.style.filter     = 'brightness(1.04)';
-                        btn.style.borderColor= 'rgba(29,158,117,0.35)';
-                    }});
+                    btn.addEventListener('mouseleave', function () {
+                        btn.style.setProperty('transition', TRANSITION_NORMAL, 'important');
+                        btn.style.setProperty('transform',  'translateY(0)',   'important');
+                        btn.style.removeProperty('filter');
+                        btn.style.setProperty('box-shadow', BASE_SHADOW,       'important');
+                    });
 
-                    btn.addEventListener('mouseleave', function() {{
-                        btn.style.transform   = 'translateY(0)';
-                        btn.style.boxShadow   = '';
-                        btn.style.filter      = '';
-                        btn.style.borderColor = '';
-                    }});
+                    btn.addEventListener('mousedown', function () {
+                        btn.style.setProperty('transition', TRANSITION_FAST, 'important');
+                        btn.style.setProperty('transform',  'translateY(-1px)', 'important');
+                        btn.style.setProperty('box-shadow', PRESS_SHADOW,      'important');
+                    });
 
-                    btn.addEventListener('mousedown', function() {{
-                        btn.style.transform =
-                            'translateY(-2px)';
-                        btn.style.transition =
-                            'transform 0.10s cubic-bezier(0.22,1,0.36,1)';
-                    }});
+                    btn.addEventListener('mouseup', function () {
+                        btn.style.setProperty('transition', TRANSITION_NORMAL, 'important');
+                        btn.style.setProperty('transform',  'translateY(-5px)', 'important');
+                        btn.style.setProperty('box-shadow', HOVER_SHADOW,      'important');
+                    });
+                });
+            });
+        }
 
-                    btn.addEventListener('mouseup', function() {{
-                        btn.style.transform =
-                            'translateY(-5px)';
-                        btn.style.transition =
-                            'transform 0.32s cubic-bezier(0.22,1,0.36,1),' +
-                            'box-shadow 0.32s cubic-bezier(0.22,1,0.36,1),' +
-                            'filter 0.22s ease-out';
-                    }});
-                }});
-            }});
-        }}
-
-        /* ── 首次執行 ────────────────────────────────────── */
-        injectCSS();
+        /* 首次執行 */
         setupButtons();
 
-        /* ── MutationObserver：Streamlit 重繪後重新套用 ──── */
-        var pending = false;
-        var observer = new MutationObserver(function() {{
-            if (pending) return;
-            pending = true;
-            setTimeout(function() {{
-                pending = false;
-                injectCSS();
-                setupButtons();
-            }}, 60);
-        }});
-
-        observer.observe(
+        /* MutationObserver：Streamlit 任何重繪後自動重套用 */
+        var timer = null;
+        new MutationObserver(function () {
+            clearTimeout(timer);
+            timer = setTimeout(setupButtons, 80);
+        }).observe(
             window.parent.document.querySelector('[data-testid="stSidebar"]') ||
             window.parent.document.body,
-            {{ childList: true, subtree: true }}
+            { childList: true, subtree: true }
         );
-    }})();
+
+    })();
     </script>
     """
 
     with st.empty():
-        st.iframe(html, height=1)
+        st.iframe(js, height=1)
 
 
 def render_footer() -> None:
@@ -1702,6 +1708,7 @@ def render_footer() -> None:
 
 def show_main() -> None:
     st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
+    st.markdown(SIDEBAR_NAV_CSS, unsafe_allow_html=True)
     new_page = render_sidebar(st.session_state.active_page)
 
     if new_page != st.session_state.active_page:
