@@ -1,176 +1,150 @@
-# StProject
+# ⚡ StProject
 
-基於 Streamlit 的柔和漸層主題 Web 應用，包含登入驗證、多頁面架構、統一 Log 系統與 AI 功能整合。
+基於 **Streamlit** 的全端 Web 管理平台，整合 AI 推理、網路爬蟲、消費記錄與多因素身份驗證，採用柔和漸層 UI 主題設計。
 
-## 專案結構
+> Python ≥ 3.12 · uv · Streamlit ≥ 1.56 · Supabase · PyTorch CUDA 12.1
+
+---
+
+## 📁 專案結構
 
 ```
 StProject/
-├── app.py                        # 主程式入口（登入 + 路由 + 全域 CSS + Footer + Log）
-├── pages/
-│   ├── __init__.py
-│   ├── home.py                   # 首頁（歡迎訊息、KPI 指標卡片、最新消息）
-│   ├── dashboard.py              # 儀表板（折線 / 長條 / 面積圖、統計卡片）
-│   ├── crawler_dashboard.py      # 網頁爬蟲工作台（兩階段 Pipeline、Tag 擷取）
-│   ├── image_upscaler.py         # AI 圖像超解析度（PyTorch CUDA + OpenCV 備援）
-│   └── settings.py               # 設定（個人資料、密碼修改、外觀偏好）
-├── core/
-│   ├── session_store.py          # Session 建立 / 驗證 / 刪除
-│   └── users.py                  # 帳號密碼驗證
-├── models/                       # OpenCV DNN 超解析度模型快取目錄（自動建立）
-├── .streamlit/
-│   └── config.toml               # Streamlit 設定
-├── pyproject.toml
-└── uv.lock
+├── app.py                  # 主程式入口（登入路由、全域 CSS、Footer、Log）
+├── pages/                  # 各功能頁面模組
+├── core/                   # 共用核心邏輯（DB、Auth、Session、TOTP、QR）
+├── models/                 # OpenCV DNN 模型快取（自動建立）
+├── .streamlit/             # Streamlit 執行設定
+├── pyproject.toml          # 專案依賴宣告（uv 管理）
+└── uv.lock                 # 鎖定版本快照
 ```
 
-## 快速開始
+### 📄 子目錄說明文件
 
-### 1. 安裝相依套件
+| 目錄 | README | 說明 |
+|------|--------|------|
+| `pages/` | [pages/README.md](pages/README.md) | 所有功能頁面（首頁、儀表板、爬蟲、超解析度、消費記錄、設定） |
+| `core/` | [core/README.md](core/README.md) | 共用核心模組（Supabase、Auth、TOTP、QR 登入、Session） |
+| `.streamlit/` | [.streamlit/README.md](.streamlit/README.md) | Streamlit 執行環境設定 |
+
+---
+
+## 🚀 環境需求
+
+| 項目 | 需求 |
+|------|------|
+| Python | ≥ 3.12 |
+| 套件管理 | [uv](https://docs.astral.sh/uv/) |
+| GPU（選用） | CUDA 12.1 相容顯示卡（AI 超解析度加速用） |
+| 資料庫 | Supabase 專案（需配置 `secrets.toml`） |
+
+---
+
+## ⚡ 快速開始
+
+### 1. 安裝套件
 
 ```bash
 uv sync
 ```
 
-### 2. 安裝 Playwright 瀏覽器（爬蟲功能需要）
+### 2. 設定 Supabase 憑證
+
+建立 `.streamlit/secrets.toml`，填入你的 Supabase 連線資訊：
+
+```toml
+[supabase]
+url = "https://xxxxxxxxxxxx.supabase.co"
+service_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+### 3. 安裝爬蟲瀏覽器（爬蟲功能需要）
 
 ```bash
 uv run playwright install chromium
 ```
 
-### 3. 啟動應用
+### 4. 啟動應用
 
 ```bash
+# 本機開發
+uv run streamlit run app.py
+
+# 區域網路分享（可讓同網段裝置存取）
 uv run streamlit run app.py --server.address=0.0.0.0 --server.port=8501
 ```
 
-## 功能說明
+瀏覽器開啟 `http://localhost:8501` 即可進入登入畫面。
 
-| 功能 | 路徑 | 說明 |
+---
+
+## 🔐 登入方式
+
+本系統支援三種登入流程，所有帳號均強制啟用 **Google Authenticator（TOTP）雙因素驗證**：
+
+| 方式 | 說明 |
+|------|------|
+| 帳號密碼 + TOTP | 輸入帳號、密碼及 6 位數驗證碼 |
+| QR Code 掃描 | 電腦顯示 QR，手機掃描後在手機端輸入憑證確認 |
+| 首次登入閘門 | 未啟用 TOTP 的帳號，登入後強制引導完成 Google Authenticator 設定 |
+
+> 測試帳號：`admin / admin123`　或　`user / user123`
+
+---
+
+## 🧩 功能一覽
+
+| 功能 | 入口 | 說明 |
 |------|------|------|
-| 🔐 登入 | `app.py` | 帳號密碼驗證，支援 URL `sid` 保留登入狀態 |
-| 🏠 首頁 | `pages/home.py` | 歡迎訊息、KPI 指標卡片、最新消息列表 |
-| 📊 儀表板 | `pages/dashboard.py` | 多種圖表、時間範圍篩選、資料表展示 |
-| 🕸 爬蟲 | `pages/crawler_dashboard.py` | 商品 / 影片爬取、自訂 Tag 擷取、兩階段 Pipeline |
-| 🖼 超解析度 | `pages/image_upscaler.py` | GPU 推理 (EDSR)、人像細節強化、PNG / JPEG 下載 |
-| ⚙️ 設定 | `pages/settings.py` | 個人資料、密碼修改、外觀偏好、系統資訊 |
-| 🚪 登出 | `app.py` sidebar | 清除 Session，返回登入畫面 |
+| 🏠 系統首頁 | `pages/home.py` | 歡迎訊息、KPI 卡片、最新消息 |
+| 💰 每日消費 | `pages/daily_expense.py` | 快速記帳、今日總覽、預算追蹤 |
+| 📊 儀表板 | `pages/dashboard.py` | 折線 / 長條 / 面積圖、時間篩選 |
+| 🕸 網頁爬蟲 | `pages/crawler_dashboard.py` | 兩階段 Pipeline、Tag 擷取、並發控制 |
+| 🖼 AI 超解析度 | `pages/image_upscaler.py` | PyTorch EDSR + OpenCV 備援、工作流節點 |
+| ⚙️ 設定 | `pages/settings.py` | 個人資料、密碼修改、TOTP 管理、系統資訊 |
 
-## 主架構設計（app.py）
+---
 
-### 色系主題
+## 🎨 UI 主題
 
-全站採用柔和淺色漸層設計：
+全站採用柔和淺色漸層設計語言：
 
-| 元素 | 色彩 |
+- **主色調**：薰衣草紫 `#7c6ff7` → 玫瑰粉 `#e879a0`
+- **背景**：米白 → 薰衣草 → 粉白三色漸層（固定）
+- **字型**：[Nunito](https://fonts.google.com/specimen/Nunito)（內文）+ [DM Mono](https://fonts.google.com/specimen/DM+Mono)（標籤 / 程式碼）
+- **Footer**：毛玻璃效果固定於底部，顯示作者資訊與技術棧標籤
+- **Topbar**：半透明毛玻璃，融入頁面漸層背景
+
+---
+
+## 📦 技術棧
+
+| 類別 | 套件 |
 |------|------|
-| 主背景 | 米白 → 薰衣草 → 粉白 三色漸層（固定背景） |
-| 側邊欄 | 純白 → 淺紫縱向漸層，右側柔和陰影 |
-| 卡片 / 表面 | `#ffffff` 純白，搭配薰衣草紫邊框 |
-| 主色調 | 薰衣草紫 `#7c6ff7` → 玫瑰粉 `#e879a0` 漸層 |
-| 文字 | 深紫灰 `#3b3552` |
-| 字型 | Nunito（內文）+ DM Mono（程式碼/標籤） |
+| 前端框架 | Streamlit ≥ 1.56 |
+| 套件管理 | uv |
+| 資料庫 | Supabase（PostgreSQL） |
+| AI 推理 | PyTorch ≥ 2.5（CUDA 12.1） |
+| 影像處理 | OpenCV ≥ 4.13、Pillow ≥ 12、BasicSR |
+| 爬蟲 | httpx、selectolax、Playwright、crawlee |
+| 身份驗證 | bcrypt、pyotp、qrcode |
+| 資料驗證 | Pydantic ≥ 2.13 |
+| 環境設定 | python-dotenv |
 
-### 側邊欄結構
+---
 
-```
-┌─────────────────────────────┐
-│  ⚡ StProject   v1.0.0      │  ← Brand 區塊
-├─────────────────────────────┤
-│  👤 admin                   │  ← 使用者名稱 chip
-│  🚪 登出                    │  ← 登出按鈕（獨立一列，同色系）
-├─────────────────────────────┤
-│  ▪ 功能導覽                 │
-│  ┌──────┬──────┬──────┐    │  ← 每列最多 3 個導覽按鈕
-│  │ 🏠   │ 📊   │ 🕸   │    │    type="primary"（CSS 精確定位）
-│  │ 首頁 │儀表板│ 爬蟲 │    │
-│  └──────┴──────┴──────┘    │
-│  ┌──────┬──────┐            │
-│  │ 🖼   │ ⚙️   │            │
-│  │超解析│ 設定 │            │
-│  └──────┴──────┘            │
-├─────────────────────────────┤
-│  ⚙ [當前頁面] 設定參數      │  ← 動態參數面板（下半部）
-│  ... 各功能專屬控制項 ...   │
-└─────────────────────────────┘
-```
+## 📝 Log 系統
 
-**導覽按鈕技術細節：**
-- 導覽按鈕使用 `type="primary"` → DOM `data-testid="stBaseButton-primary"`
-- 登出按鈕使用預設 `type="secondary"` → DOM `data-testid="stBaseButton-secondary"`
-- 兩者 CSS selector 完全獨立，不互相干擾
-
-### 頁面標題 Hero 橫幅
-
-每個功能頁面最上方統一渲染 Hero 橫幅，包含功能 icon、頁面標題（漸層文字）、副標題，背景帶裝飾性漸層光暈。
-
-### 動態參數面板
-
-側邊欄下半部根據當前頁面動態渲染對應參數，切換頁面時自動清除前頁殘留的 `session_state` 值，防止型別污染：
-
-| 頁面 | 參數 |
-|------|------|
-| 🏠 首頁 | 無 |
-| 📊 儀表板 | 時間範圍、圖表類型、動態效果 |
-| 🕸 爬蟲 | 最大並發數、請求延遲、逾時時間、重試次數、robots.txt |
-| 🖼 超解析度 | AI 模型、放大倍數、GPU 加速、人像模式、銳化強度 |
-| ⚙️ 設定 | 無 |
-
-### Footer
-
-固定於畫面底部，半透明毛玻璃效果（`rgba(250,248,255,0.90)` + `backdrop-filter: blur`）：
-- 左側：設計者姓名（Kevin Wu）、版權資訊
-- 右側：當前日期、技術棧標籤
-
-### Topbar
-
-Streamlit 原生頂端列改為半透明毛玻璃，融入頁面漸層背景。Streamlit MPA 原生頁面導覽列（`stSidebarNav`）已透過 CSS 隱藏。
-
-## Log 系統
-
-統一格式：
-
-```
-時間戳  [LEVEL   ]  模組名稱                 │  訊息內容
-```
-
-功能切換時在 CMD 輸出 `═` 符號橫幅區隔：
+統一格式輸出至 stdout，功能切換時自動插入區隔橫幅：
 
 ```
 ════════════════════════════════════════════════════════════════════════════
   ▶  PAGE: 網頁爬蟲工作台
 ════════════════════════════════════════════════════════════════════════════
 
-2026-04-19 15:42:10  [INFO    ]  pages.crawler_dashboard   │  渲染爬蟲頁面 ─ user=admin
+2026-05-02 10:00:00  [INFO    ]  pages.crawler_dashboard   │  渲染爬蟲頁面 ─ user=admin
 ```
 
-各模組 Logger 命名：
+---
 
-| 模組 | Logger 名稱 |
-|------|-------------|
-| 主程式 | `app` |
-| 首頁 | `pages.home` |
-| 儀表板 | `pages.dashboard` |
-| 爬蟲 | `pages.crawler_dashboard` |
-| 超解析度 | `pages.image_upscaler` |
-| 設定 | `pages.settings` |
-
-## 測試帳號
-
-| 帳號 | 密碼 |
-|------|------|
-| admin | admin123 |
-| user | user123 |
-
-## 技術棧
-
-| 類別 | 套件 / 版本 |
-|------|------------|
-| 前端框架 | Streamlit ≥ 1.56 |
-| 套件管理 | uv |
-| AI 推理 | PyTorch ≥ 2.5（CUDA 12.1） |
-| 影像處理 | OpenCV ≥ 4.13、Pillow ≥ 12 |
-| 爬蟲 | httpx、selectolax、Playwright、crawlee |
-| 資料驗證 | Pydantic ≥ 2.13 |
-| 環境設定 | python-dotenv |
-| Python | ≥ 3.12 |
+*© 2026 Kevin Wu · Built with Streamlit & uv*
