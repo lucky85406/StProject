@@ -1190,6 +1190,15 @@ PAGE_CONFIG: list[dict[str, Any]] = [
         "params": [],  # 首頁無側邊欄參數
     },
     {
+        "id": "daily_expense",
+        "icon": "💰",
+        "label": "消費",
+        "title": "每日消費記錄",
+        "subtitle": "快速記帳 · 今日總覽 · 預算追蹤",
+        "module": "pages.daily_expense",
+        "params": [],  # 此頁無側邊欄參數
+    },
+    {
         "id": "dashboard",
         "icon": "📊",
         "label": "儀表板",

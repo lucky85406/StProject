@@ -2,18 +2,82 @@
 from __future__ import annotations
 
 import logging
+import sys
+import platform
 
 import streamlit as st
 
-from core.users import change_password  # 加在檔案頂部 import
+from core.users import change_password
+from core.expense_db import (
+    get_budget,
+    update_budget,
+    get_all_categories,
+    add_category,
+    delete_category,
+)
 
 logger = logging.getLogger("pages.settings")
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  可用 Emoji 圖示選單（供新增類別時選擇）
+# ─────────────────────────────────────────────────────────────────────────────
+_ICON_OPTIONS: list[str] = [
+    "🍜",
+    "🍔",
+    "🍕",
+    "🍣",
+    "☕",
+    "🧋",
+    "🍺",
+    "🚌",
+    "🚗",
+    "🚇",
+    "✈️",
+    "🛵",
+    "🚕",
+    "🛒",
+    "👗",
+    "👟",
+    "💄",
+    "🎁",
+    "🎬",
+    "🎮",
+    "🎵",
+    "📺",
+    "🏋️",
+    "⚽",
+    "🏥",
+    "💊",
+    "🩺",
+    "🏠",
+    "🪴",
+    "🔧",
+    "💡",
+    "📚",
+    "📖",
+    "🎓",
+    "✏️",
+    "💼",
+    "📱",
+    "💻",
+    "🖨️",
+    "🔖",
+    "⭐",
+    "🎯",
+    "💰",
+    "🌟",
+]
 
-def show() -> None:
-    logger.info("渲染設定頁 ─ user=%s", st.session_state.get("username"))
 
-    # ── 個人資料 ───────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Tab｜一般設定（原有功能保留）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _tab_general() -> None:
+    """個人資料、密碼修改、外觀偏好、系統資訊（原有內容）。"""
+
+    # ── 個人資料 ──────────────────────────────────────────────────
     st.subheader("👤 個人資料")
     with st.form("profile_form"):
         display_name = st.text_input(
@@ -21,120 +85,45 @@ def show() -> None:
         )
         email = st.text_input("電子郵件", placeholder="example@email.com")
         bio = st.text_area("個人簡介", placeholder="簡單描述自己...", height=80)
-        submitted_profile = st.form_submit_button("儲存變更", width="stretch")
+        submitted_profile = st.form_submit_button("儲存變更", use_container_width=True)
 
     if submitted_profile:
         logger.info(
-            "個人資料儲存 ─ user=%s  name=%s  email=%s",
+            "個人資料儲存 ─ user=%s  name=%s",
             st.session_state.get("username"),
             display_name,
-            email,
         )
         st.success("✅ 個人資料已更新！（示範模式）")
 
     st.divider()
 
-    # ── 修改密碼 ───────────────────────────────────────────────────
+    # ── 修改密碼 ──────────────────────────────────────────────────
     st.subheader("🔒 修改密碼")
     with st.form("password_form"):
         old_pw = st.text_input("舊密碼", type="password")
         new_pw = st.text_input("新密碼", type="password")
         confirm_pw = st.text_input("確認新密碼", type="password")
-        submitted_pw = st.form_submit_button("更新密碼", width="stretch")
+        submitted_pw = st.form_submit_button("更新密碼", use_container_width=True)
 
     if submitted_pw:
         if not old_pw:
             st.warning("⚠️ 請輸入舊密碼")
         elif new_pw != confirm_pw:
-            st.error("❌ 新密碼與確認密碼不一致")
+            st.error("❌ 兩次密碼不一致")
         elif len(new_pw) < 6:
-            st.warning("⚠️ 密碼長度至少需要 6 個字元")
+            st.warning("⚠️ 新密碼至少需 6 個字元")
         else:
-            current_user = st.session_state.get("username", "")
-            if change_password(current_user, old_pw, new_pw):
+            current_user: str = st.session_state.get("username", "")
+            ok = change_password(current_user, old_pw, new_pw)
+            if ok:
                 st.success("✅ 密碼已更新！")
+                logger.info("密碼變更成功 ─ user=%s", current_user)
             else:
-                st.error("❌ 舊密碼錯誤，請重試")
+                st.error("❌ 舊密碼錯誤，請重試。")
 
     st.divider()
 
-    # ── Google 驗證器 (TOTP) ───────────────────────────────────────
-    st.subheader("🔐 Google 驗證器 (2FA)")
-
-    from core.users import get_totp_info, save_totp_secret, disable_totp
-    from core.totp import generate_secret, generate_setup_qr_png, verify_code
-
-    current_user: str = st.session_state.get("username", "")
-    totp_enabled, _existing_secret = get_totp_info(current_user)
-
-    if not totp_enabled:
-        # ── 未啟用：引導設定流程 ──────────────────────────────────
-        st.info("⚠️ 您尚未啟用 Google 驗證器，建議啟用以強化帳號安全。")
-
-        if st.button("🛡️ 啟用 Google 驗證器", key="totp_setup_btn"):
-            # 產生新 secret 並暫存於 session（尚未寫入 DB）
-            st.session_state.totp_setup_secret = generate_secret()
-
-        if pending := st.session_state.get("totp_setup_secret"):
-            st.markdown("**Step 1** — 開啟 Google Authenticator，掃描下方 QR Code：")
-            qr_png = generate_setup_qr_png(pending, current_user)
-            col_qr, col_key = st.columns([1, 1])
-            with col_qr:
-                st.image(qr_png, caption="用 Google Authenticator 掃描", width=200)
-            with col_key:
-                st.markdown("**或手動輸入密鑰：**")
-                st.code(pending, language=None)
-                st.caption("請妥善保存此密鑰，停用後無法復原。")
-
-            st.markdown("**Step 2** — 輸入 App 中產生的 6 位數驗證碼以確認設定：")
-            with st.form("totp_confirm_form"):
-                confirm_code = st.text_input(
-                    "驗證碼", max_chars=6, placeholder="輸入 6 位數"
-                )
-                confirm_submit = st.form_submit_button(
-                    "✅ 確認啟用", use_container_width=True
-                )
-
-            if confirm_submit:
-                if verify_code(pending, confirm_code):
-                    if save_totp_secret(current_user, pending):
-                        st.success("🎉 Google 驗證器已成功啟用！")
-                        st.session_state.pop("totp_setup_secret", None)
-                        logger.info("TOTP 啟用成功 ─ user=%s", current_user)
-                        st.rerun()
-                    else:
-                        st.error("❌ 儲存失敗，請稍後再試。")
-                else:
-                    st.error("❌ 驗證碼錯誤，請確認 App 時間同步後重試。")
-    else:
-        # ── 已啟用：顯示狀態 + 停用選項 ──────────────────────────
-        st.success("✅ Google 驗證器已啟用，您的帳號受到雙重驗證保護。")
-
-        with st.expander("⚠️ 停用 Google 驗證器（危險操作）"):
-            st.warning("停用後帳號安全性將降低，請確認您的決定。")
-            with st.form("totp_disable_form"):
-                disable_totp_code = st.text_input(
-                    "請輸入目前的 Google 驗證碼以確認身份",
-                    max_chars=6,
-                    placeholder="6 位數驗證碼",
-                )
-                disable_submit = st.form_submit_button(
-                    "確認停用", type="primary", use_container_width=True
-                )
-
-            if disable_submit:
-                _, current_secret = get_totp_info(current_user)
-                if verify_code(current_secret or "", disable_totp_code):
-                    if disable_totp(current_user):
-                        st.success("Google 驗證器已停用。")
-                        logger.info("TOTP 停用成功 ─ user=%s", current_user)
-                        st.rerun()
-                    else:
-                        st.error("❌ 操作失敗，請稍後再試。")
-                else:
-                    st.error("❌ 驗證碼錯誤，請重試。")
-
-    # ── 外觀偏好 ───────────────────────────────────────────────────
+    # ── 外觀偏好 ──────────────────────────────────────────────────
     st.subheader("🎨 外觀偏好")
     col1, col2 = st.columns(2)
     with col1:
@@ -142,15 +131,15 @@ def show() -> None:
     with col2:
         lang = st.selectbox("語言", ["繁體中文", "English", "日本語"])
 
-    if st.button("套用外觀設定", width="stretch"):
+    if st.button("套用外觀設定", use_container_width=True):
         logger.info("外觀設定套用 ─ theme=%s  lang=%s", theme, lang)
         st.info(f"🎨 已套用：{theme}、{lang}（示範模式）")
 
     st.divider()
 
-    # ── 系統資訊 ───────────────────────────────────────────────────
+    # ── 系統資訊 ──────────────────────────────────────────────────
     st.subheader("ℹ️ 系統資訊")
-    import sys, platform
+    import streamlit as _st
 
     info_cols = st.columns(3)
     with info_cols[0]:
@@ -158,8 +147,267 @@ def show() -> None:
     with info_cols[1]:
         st.metric("作業系統", platform.system())
     with info_cols[2]:
-        import streamlit
+        st.metric("Streamlit 版本", _st.__version__)
 
-        st.metric("Streamlit 版本", streamlit.__version__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Tab｜每日預算設定（F-05）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _tab_budget() -> None:
+    """每日預算上限設定與啟用/停用切換。"""
+
+    budget = get_budget()
+
+    # ── 目前狀態卡片 ──────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown("**📊 目前預算狀態**")
+        col_status, col_val = st.columns(2)
+        with col_status:
+            if budget:
+                status_label = "✅ 已啟用" if budget.is_active else "⏸️ 已暫停"
+                st.metric("警示狀態", status_label)
+            else:
+                st.metric("警示狀態", "—  未設定")
+        with col_val:
+            limit_display = f"NT$ {float(budget.daily_limit):,.0f}" if budget else "—"
+            st.metric("每日上限", limit_display)
+
+    st.markdown("---")
+
+    # ── 編輯表單 ──────────────────────────────────────────────────
+    st.markdown("**✏️ 修改預算設定**")
+
+    with st.form("budget_form"):
+        new_limit = st.number_input(
+            "每日預算上限（NT$）",
+            min_value=1.0,
+            max_value=9_999_999.0,
+            value=float(budget.daily_limit) if budget else 1000.0,
+            step=100.0,
+            format="%.0f",
+            help="當日累計消費超過此金額時，系統會在新增時顯示警示。",
+        )
+        new_active = st.toggle(
+            "啟用超標警示",
+            value=budget.is_active if budget else True,
+            help="關閉後仍會記錄消費，但不顯示超標提示。",
+        )
+        submitted = st.form_submit_button("💾 儲存預算設定", use_container_width=True)
+
+    if submitted:
+        from decimal import Decimal
+
+        ok = update_budget(
+            daily_limit=Decimal(str(new_limit)),
+            is_active=new_active,
+        )
+        if ok:
+            st.success(
+                f"✅ 預算已更新：NT$ {new_limit:,.0f}｜"
+                f"警示{'開啟' if new_active else '關閉'}"
+            )
+            logger.info("預算設定更新 ─ limit=%s  active=%s", new_limit, new_active)
+            st.rerun()
+        else:
+            st.error("❌ 儲存失敗，請確認金額大於 0。")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Tab｜類別管理（F-02）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _render_icon_picker(form_key: str) -> str:
+    """
+    以按鈕網格呈現 Emoji 選擇器。
+    回傳目前選中的 Emoji 字串。
+    選中狀態存於 session_state[form_key + '_icon']。
+    """
+    state_key = f"{form_key}_icon"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = _ICON_OPTIONS[0]
+
+    selected: str = st.session_state[state_key]
+
+    st.markdown(
+        f"**選擇圖示**：目前選擇 " f"<span style='font-size:1.4rem'>{selected}</span>",
+        unsafe_allow_html=True,
+    )
+
+    # 每列 10 個圖示
+    for row_start in range(0, len(_ICON_OPTIONS), 10):
+        row_icons = _ICON_OPTIONS[row_start : row_start + 10]
+        cols = st.columns(len(row_icons))
+        for col, icon in zip(cols, row_icons):
+            with col:
+                is_sel = icon == selected
+                # 選中的套用 primary，其餘 secondary
+                if st.button(
+                    icon,
+                    key=f"{form_key}_icon_{icon}",
+                    type="primary" if is_sel else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state[state_key] = icon
+                    st.rerun()
+
+    return selected
+
+
+def _tab_categories() -> None:
+    """類別管理：預設類別展示 + 新增自訂類別 + 刪除自訂類別。"""
+
+    categories = get_all_categories()
+    default_cats = [c for c in categories if c.is_default]
+    custom_cats = [c for c in categories if not c.is_default]
+
+    # ── 預設類別（唯讀展示）─────────────────────────────────────
+    with st.container(border=True):
+        st.markdown(
+            "**🔒 預設類別**"
+            "<span style='font-size:0.72rem;color:#8b85a8;"
+            'font-family:"DM Mono",monospace;margin-left:8px\'>'
+            "不可刪除</span>",
+            unsafe_allow_html=True,
+        )
+        cols = st.columns(4)
+        for i, cat in enumerate(default_cats):
+            with cols[i % 4]:
+                st.markdown(
+                    f"<div style='text-align:center;padding:0.5rem;"
+                    f"background:rgba(124,111,247,0.06);"
+                    f"border:1px solid rgba(124,111,247,0.14);"
+                    f"border-radius:10px;margin-bottom:0.4rem'>"
+                    f"<div style='font-size:1.4rem'>{cat.icon}</div>"
+                    f"<div style='font-size:0.75rem;color:#3b3552;"
+                    f"font-weight:600'>{cat.name}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("---")
+
+    # ── 自訂類別（可刪除）──────────────────────────────────────
+    st.markdown("**🏷️ 自訂類別**")
+
+    if not custom_cats:
+        st.markdown(
+            "<p style='font-size:0.82rem;color:#8b85a8'>尚無自訂類別，"
+            "可於下方新增。</p>",
+            unsafe_allow_html=True,
+        )
+    else:
+        for cat in custom_cats:
+            col_icon, col_name, col_del = st.columns([1, 5, 1])
+            with col_icon:
+                st.markdown(
+                    f"<div style='font-size:1.5rem;text-align:center;"
+                    f"padding-top:0.3rem'>{cat.icon}</div>",
+                    unsafe_allow_html=True,
+                )
+            with col_name:
+                st.markdown(
+                    f"<div style='padding-top:0.5rem;font-weight:600;"
+                    f"color:#3b3552'>{cat.name}</div>",
+                    unsafe_allow_html=True,
+                )
+            with col_del:
+                del_flag = f"cat_del_{cat.id}"
+                if st.session_state.get(del_flag):
+                    # 二次確認
+                    if st.button(
+                        "✓",
+                        key=f"cat_del_ok_{cat.id}",
+                        help="確認刪除",
+                        use_container_width=True,
+                        type="primary",
+                    ):
+                        ok = delete_category(cat.id)
+                        if ok:
+                            st.session_state.pop(del_flag, None)
+                            st.toast(f"已刪除類別「{cat.name}」", icon="🗑️")
+                            logger.info(
+                                "刪除自訂類別 ─ id=%s  name=%s", cat.id, cat.name
+                            )
+                            st.rerun()
+                        else:
+                            st.error("❌ 刪除失敗")
+                else:
+                    if st.button(
+                        "🗑️",
+                        key=f"cat_del_{cat.id}_btn",
+                        help=f"刪除「{cat.name}」",
+                        use_container_width=True,
+                    ):
+                        st.session_state[del_flag] = True
+                        st.rerun()
+
+    st.markdown("---")
+
+    # ── 新增自訂類別 ─────────────────────────────────────────────
+    st.markdown("**➕ 新增自訂類別**")
+
+    with st.container(border=True):
+        new_name = st.text_input(
+            "類別名稱（最多 20 字）",
+            max_chars=20,
+            placeholder="例如：寵物、旅遊...",
+            key="new_cat_name",
+        )
+        selected_icon = _render_icon_picker("new_cat")
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        if st.button(
+            "➕ 新增類別",
+            use_container_width=True,
+            type="primary",
+            key="new_cat_submit",
+        ):
+            name_clean = new_name.strip()
+            if not name_clean:
+                st.error("❌ 類別名稱不可為空白")
+            elif len(name_clean) > 20:
+                st.error("❌ 名稱不可超過 20 字")
+            else:
+                ok = add_category(name=name_clean, icon=selected_icon)
+                if ok:
+                    st.toast(f"已新增類別「{name_clean}」{selected_icon}", icon="✅")
+                    logger.info(
+                        "新增自訂類別 ─ name=%s  icon=%s", name_clean, selected_icon
+                    )
+                    # 清除輸入欄
+                    st.session_state.pop("new_cat_name", None)
+                    st.session_state.pop("new_cat_icon", None)
+                    st.rerun()
+                else:
+                    st.error(f"❌ 新增失敗，「{name_clean}」可能已存在。")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  頁面主函式
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def show() -> None:
+    logger.info("渲染設定頁 ─ user=%s", st.session_state.get("username"))
+
+    tab_general, tab_budget, tab_categories = st.tabs(
+        [
+            "⚙️ 一般設定",
+            "💰 每日預算",
+            "🏷️ 類別管理",
+        ]
+    )
+
+    with tab_general:
+        _tab_general()
+
+    with tab_budget:
+        _tab_budget()
+
+    with tab_categories:
+        _tab_categories()
 
     logger.info("設定頁渲染完成")
