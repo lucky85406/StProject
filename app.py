@@ -420,49 +420,24 @@ div[data-testid="stButton"] > button:hover {
 }
 
 /* ── Sidebar 導覽按鈕（type=primary）─────────────────────────────── */
-[data-testid="stSidebar"] [data-testid="stBaseButton-primary"] {
-    background: rgba(255,255,255,0.70) !important;
-    border: 1px solid rgba(124,111,247,0.14) !important;
-    border-radius: 10px !important;
-    padding: 10px 4px !important;
-    min-height: 62px !important;
-    white-space: pre-wrap !important;
-    line-height: 1.4 !important;
-    font-size: 0.75rem !important;
-    font-weight: 600 !important;
-    color: #8b85a8 !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    gap: 2px !important;
-    box-shadow: 0 1px 4px rgba(124,111,247,0.06) !important;
-    transition: all 0.2s !important;
-}
 [data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:hover {
-    background: rgba(124,111,247,0.08) !important;
-    border-color: rgba(124,111,247,0.30) !important;
-    color: #7c6ff7 !important;
-    box-shadow: 0 3px 12px rgba(124,111,247,0.12) !important;
+    transform: translateY(-5px) !important;
+    background: rgba(255,255,255,0.95) !important;
+    border-color: rgba(124,111,247,0.38) !important;
+    box-shadow:
+        0 6px 20px rgba(124,111,247,0.18),
+        0 2px 8px rgba(124,111,247,0.10),
+        inset 0 1px 0 rgba(255,255,255,0.80) !important;
 }
-
+/* 新增：點擊按下效果（回彈感） */
+[data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:active {
+    transform: translateY(-1px) !important;
+    box-shadow:
+        0 3px 10px rgba(124,111,247,0.14),
+        inset 0 1px 0 rgba(255,255,255,0.60) !important;
+    transition-duration: 0.08s !important;
+}
 /* ── 登出按鈕（type=secondary，與 user chip 同色系）────────────────── */
-[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
-    background: rgba(124,111,247,0.07) !important;
-    border: 1px solid rgba(124,111,247,0.20) !important;
-    border-radius: 999px !important;
-    color: #7c6ff7 !important;
-    min-height: 36px !important;
-    height: 36px !important;
-    font-size: 0.8rem !important;
-    font-weight: 700 !important;
-    font-family: 'Nunito', sans-serif !important;
-    padding: 0 16px !important;
-    box-shadow: none !important;
-    flex-direction: row !important;
-    white-space: nowrap !important;
-    letter-spacing: 0.02em !important;
-    transition: all 0.2s !important;
-}
 [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover {
     background: rgba(239,68,68,0.07) !important;
     border-color: rgba(239,68,68,0.28) !important;
@@ -1458,7 +1433,7 @@ def render_sidebar(active_id: str) -> str:
                         key=f"nav_{page['id']}",
                         use_container_width=True,
                         help=page["title"],
-                        type="primary",
+                        type="secondary",  # ← secondary，避開 primaryColor 鎖定
                     ):
                         new_page = page["id"]
                         logger.info(
@@ -1505,34 +1480,196 @@ def render_page_hero(page_cfg: dict) -> None:
     )
 
 
-def _inject_active_nav_style(active_id: str) -> None:
+def _inject_sidebar_nav_style(active_id: str) -> None:
     """
-    注入 active 導覽按鈕高亮樣式。
-    Streamlit button 的 DOM key 不直接暴露於 CSS selector，
-    改用 sidebar 內所有 stButton 的順序（nth-of-type）精確定位。
-    PAGE_CONFIG 的順序即為按鈕的渲染順序。
+    CSS 負責顏色與漸層，JS 負責 hover 浮起動效與 overflow 修正。
+    ⚠️ 必須在 mod.show() 之後呼叫。
     """
-    active_idx = next(
-        (i + 1 for i, p in enumerate(PAGE_CONFIG) if p["id"] == active_id), 1
+    active_idx: int = next(
+        (i for i, p in enumerate(PAGE_CONFIG) if p["id"] == active_id), 0
     )
-    st.markdown(
-        f"""
-        <style>
-        /* Active nav button: 側邊欄第 {active_idx} 個 primary button */
-        [data-testid="stSidebar"] [data-testid="stButton"]:nth-of-type({active_idx}) [data-testid="stBaseButton-primary"] {{
-            background: linear-gradient(135deg,
-                rgba(124,111,247,0.16) 0%,
-                rgba(232,121,160,0.12) 100%) !important;
-            border: 1px solid rgba(124,111,247,0.40) !important;
-            color: #7c6ff7 !important;
-            box-shadow: 0 2px 12px rgba(124,111,247,0.16),
-                        inset 0 1px 0 rgba(255,255,255,0.60) !important;
-            font-weight: 700 !important;
+    row_block: int = (active_idx // 3) + 2
+    col_pos: int = (active_idx % 3) + 1
+
+    _sb = '[data-testid="stSidebar"]'
+    _hb = '[data-testid="stHorizontalBlock"]'
+    _col = '[data-testid="stColumn"]'
+    _btn = 'button[data-testid="stBaseButton-secondary"]'
+    _all_nav = f"{_sb} {_hb}:not(:first-of-type) {_btn}"
+    _active = (
+        f"{_sb} {_hb}:nth-of-type({row_block}) " f"{_col}:nth-child({col_pos}) {_btn}"
+    )
+    _logout = f"{_sb} {_hb}:first-of-type {_btn}"
+
+    css = f"""
+        {_all_nav} {{
+            background-image : linear-gradient(145deg,
+                #e0f7f3 0%, #f0f9ff 60%, #eef6ff 100%) !important;
+            border           : 1px solid rgba(29,158,117,0.20) !important;
+            border-radius    : 10px !important;
+            padding          : 10px 4px !important;
+            min-height       : 62px !important;
+            width            : 100% !important;
+            white-space      : pre-wrap !important;
+            line-height      : 1.4 !important;
+            font-size        : 0.75rem !important;
+            font-weight      : 600 !important;
+            color            : #0f6e56 !important;
+            display          : flex !important;
+            flex-direction   : column !important;
+            align-items      : center !important;
+            justify-content  : center !important;
+            gap              : 3px !important;
+            box-shadow       : 0 1px 4px rgba(29,158,117,0.08),
+                               inset 0 1px 0 rgba(255,255,255,0.80) !important;
         }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        {_active} {{
+            background-image : linear-gradient(145deg,
+                #b8f0e8 0%, #d6f0ff 55%, #dceeff 100%) !important;
+            border           : 1px solid rgba(15,110,86,0.38) !important;
+            color            : #085041 !important;
+            font-weight      : 700 !important;
+            box-shadow       : 0 2px 12px rgba(29,158,117,0.22),
+                               inset 0 1px 0 rgba(255,255,255,0.90) !important;
+        }}
+        {_logout} {{
+            background-image : none !important;
+            background       : rgba(124,111,247,0.07) !important;
+            border           : 1px solid rgba(124,111,247,0.20) !important;
+            border-radius    : 999px !important;
+            color            : #7c6ff7 !important;
+            min-height       : 36px !important;
+            height           : 36px !important;
+            font-size        : 0.8rem !important;
+            font-weight      : 700 !important;
+            padding          : 0 16px !important;
+            flex-direction   : row !important;
+            white-space      : nowrap !important;
+            box-shadow       : none !important;
+        }}
+        {_logout}:hover {{
+            background       : rgba(239,68,68,0.07) !important;
+            border-color     : rgba(239,68,68,0.28) !important;
+            color            : #ef4444 !important;
+        }}
+    """
+
+    escaped_css = css.replace("\\", "\\\\").replace("`", "\\`")
+
+    html = f"""
+    <script>
+    (function() {{
+        var STYLE_ID = 'stproject-nav-css';
+
+        /* ── 注入靜態 CSS（顏色、漸層）────────────────────── */
+        function injectCSS() {{
+            var ex = window.parent.document.getElementById(STYLE_ID);
+            if (ex) ex.remove();
+            var s = window.parent.document.createElement('style');
+            s.id = STYLE_ID;
+            s.textContent = `{escaped_css}`;
+            window.parent.document.head.appendChild(s);
+        }}
+
+        /* ── 修正 overflow + 綁定 hover 動效 ──────────────── */
+        function setupButtons() {{
+            var doc     = window.parent.document;
+            var sidebar = doc.querySelector('[data-testid="stSidebar"]');
+            if (!sidebar) return;
+
+            var hblocks = sidebar.querySelectorAll('[data-testid="stHorizontalBlock"]');
+
+            Array.from(hblocks).forEach(function(hb, idx) {{
+                if (idx === 0) return;   // 跳過 user/logout 列
+
+                /* 逐層解除 overflow 限制 */
+                hb.style.setProperty('overflow', 'visible', 'important');
+                hb.querySelectorAll('[data-testid="stColumn"]').forEach(function(col) {{
+                    col.style.setProperty('overflow', 'visible', 'important');
+                    var child = col.firstElementChild;
+                    while (child) {{
+                        child.style.setProperty('overflow', 'visible', 'important');
+                        child = child.firstElementChild;
+                    }}
+                }});
+
+                /* 對每顆按鈕綁定 JS hover */
+                hb.querySelectorAll('button[data-testid="stBaseButton-secondary"]')
+                  .forEach(function(btn) {{
+
+                    /* 移除舊的 listener（防止重複綁定）*/
+                    if (btn._navHoverBound) return;
+                    btn._navHoverBound = true;
+
+                    btn.style.transition =
+                        'transform 0.32s cubic-bezier(0.22,1,0.36,1),' +
+                        'box-shadow 0.32s cubic-bezier(0.22,1,0.36,1),' +
+                        'filter 0.22s ease-out';
+                    btn.style.willChange = 'transform, box-shadow';
+
+                    btn.addEventListener('mouseenter', function() {{
+                        btn.style.transform  = 'translateY(-5px)';
+                        btn.style.boxShadow  =
+                            '0 10px 28px rgba(29,158,117,0.18),' +
+                            '0 3px 8px rgba(29,158,117,0.10),' +
+                            'inset 0 1px 0 rgba(255,255,255,0.95)';
+                        btn.style.filter     = 'brightness(1.04)';
+                        btn.style.borderColor= 'rgba(29,158,117,0.35)';
+                    }});
+
+                    btn.addEventListener('mouseleave', function() {{
+                        btn.style.transform   = 'translateY(0)';
+                        btn.style.boxShadow   = '';
+                        btn.style.filter      = '';
+                        btn.style.borderColor = '';
+                    }});
+
+                    btn.addEventListener('mousedown', function() {{
+                        btn.style.transform =
+                            'translateY(-2px)';
+                        btn.style.transition =
+                            'transform 0.10s cubic-bezier(0.22,1,0.36,1)';
+                    }});
+
+                    btn.addEventListener('mouseup', function() {{
+                        btn.style.transform =
+                            'translateY(-5px)';
+                        btn.style.transition =
+                            'transform 0.32s cubic-bezier(0.22,1,0.36,1),' +
+                            'box-shadow 0.32s cubic-bezier(0.22,1,0.36,1),' +
+                            'filter 0.22s ease-out';
+                    }});
+                }});
+            }});
+        }}
+
+        /* ── 首次執行 ────────────────────────────────────── */
+        injectCSS();
+        setupButtons();
+
+        /* ── MutationObserver：Streamlit 重繪後重新套用 ──── */
+        var pending = false;
+        var observer = new MutationObserver(function() {{
+            if (pending) return;
+            pending = true;
+            setTimeout(function() {{
+                pending = false;
+                injectCSS();
+                setupButtons();
+            }}, 60);
+        }});
+
+        observer.observe(
+            window.parent.document.querySelector('[data-testid="stSidebar"]') ||
+            window.parent.document.body,
+            {{ childList: true, subtree: true }}
+        );
+    }})();
+    </script>
+    """
+
+    with st.empty():
+        st.iframe(html, height=1)
 
 
 def render_footer() -> None:
@@ -1564,16 +1701,9 @@ def render_footer() -> None:
 
 
 def show_main() -> None:
-    # 注入全域 CSS
     st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
-
-    # 渲染側邊欄，取回可能的新頁面選擇
     new_page = render_sidebar(st.session_state.active_page)
 
-    # 注入 active 導覽按鈕高亮（在 sidebar 渲染後）
-    _inject_active_nav_style(st.session_state.active_page)
-
-    # 偵測頁面切換
     if new_page != st.session_state.active_page:
         st.session_state.active_page = new_page
         st.rerun()
@@ -1581,19 +1711,12 @@ def show_main() -> None:
     active_id = st.session_state.active_page
     page_cfg = PAGE_MAP.get(active_id, PAGE_CONFIG[0])
 
-    # ── 頁面 Hero 標題 ────────────────────────────────────────────
     render_page_hero(page_cfg)
-
-    # ── Log 頁面進入 ──────────────────────────────────────────────
     log_section(f"PAGE: {page_cfg['title'].upper()}")
     logger.info(
-        "進入功能頁面 ─ id=%s  title=%s  user=%s",
-        active_id,
-        page_cfg["title"],
-        st.session_state.get("username"),
+        "進入功能頁面 ─ id=%s  user=%s", active_id, st.session_state.get("username")
     )
 
-    # ── 動態載入頁面模組 ──────────────────────────────────────────
     module_path = page_cfg["module"]
     try:
         import importlib
@@ -1605,15 +1728,15 @@ def show_main() -> None:
             mod.main()
         else:
             st.warning(f"⚠️ 模組 `{module_path}` 尚未實作 `show()` 函式。")
-            logger.warning("模組缺少 show() ─ module=%s", module_path)
     except ModuleNotFoundError as exc:
         st.error(f"❌ 無法載入模組：`{module_path}`\n\n{exc}")
-        logger.error("模組載入失敗 ─ module=%s  error=%s", module_path, exc)
     except Exception as exc:
         st.error(f"❌ 頁面執行發生錯誤：{exc}")
-        logger.exception("頁面執行例外 ─ module=%s", module_path)
 
-    # ── Footer（固定在畫面底部）───────────────────────────────────
+    time.sleep(0)  # 讓出事件循環
+    # ⚠️ 側邊欄樣式必須在 mod.show() 之後注入，永遠壓過頁面 CSS
+    _inject_sidebar_nav_style(active_id)
+
     render_footer()
 
 
