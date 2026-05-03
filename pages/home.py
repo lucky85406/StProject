@@ -6,66 +6,9 @@ import datetime
 
 import streamlit as st
 
-logger = logging.getLogger("pages.home")
+from config.pages import HOME_CARDS
 
-# ── 功能導覽卡片定義（與 app.py PAGE_CONFIG 保持同步）────────────────
-_FEATURE_CARDS: list[dict] = [
-    {
-        "id": "daily_expense",
-        "icon": "💰",
-        "title": "每日消費記錄",
-        "desc": "快速記帳、預算追蹤與多類別管理",
-        "accent": "#10b981",  # 綠色
-        "accent_soft": "rgba(16,185,129,0.10)",
-        "border_soft": "rgba(16,185,129,0.20)",
-    },
-    {
-        "id": "dashboard",
-        "icon": "📊",
-        "title": "資料儀表板",
-        "desc": "趨勢圖表、時間維度分析與資料視覺化",
-        "accent": "#6c8eff",
-        "accent_soft": "rgba(108,142,255,0.10)",
-        "border_soft": "rgba(108,142,255,0.22)",
-    },
-    {
-        "id": "crawler_dashboard",
-        "icon": "🕸",
-        "title": "網頁爬蟲工作台",
-        "desc": "兩階段 Pipeline、自動偵測商品與影片頁",
-        "accent": "#f59e0b",
-        "accent_soft": "rgba(245,158,11,0.10)",
-        "border_soft": "rgba(245,158,11,0.22)",
-    },
-    {
-        "id": "image_upscaler",
-        "icon": "🖼",
-        "title": "AI 圖像超解析度",
-        "desc": "GPU/CPU 自動切換，EDSR 模型放大推理",
-        "accent": "#e879a0",
-        "accent_soft": "rgba(232,121,160,0.10)",
-        "border_soft": "rgba(232,121,160,0.22)",
-    },
-    {
-        "id": "ocr_scanner",
-        "icon": "🔍",
-        "label": "OCR",
-        "title": "OCR 文字辨識",
-        "desc": "圖像文字提取 · 多語言支援 · PDF 批次解析",
-        "accent": "#4982A6",
-        "accent_soft": "rgba(73,130,166,0.10)",
-        "border_soft": "rgba(73,130,166,0.22)",
-    },
-    {
-        "id": "settings",
-        "icon": "⚙️",
-        "title": "系統設定",
-        "desc": "帳號管理、TOTP 驗證器與外觀偏好",
-        "accent": "#8b85a8",
-        "accent_soft": "rgba(139,133,168,0.10)",
-        "border_soft": "rgba(139,133,168,0.22)",
-    },
-]
+logger = logging.getLogger("pages.home")
 
 
 def _navigate_to(page_id: str) -> None:
@@ -110,8 +53,8 @@ def show() -> None:
 
     # 每行最多 3 欄
     _COLS_PER_ROW = 3
-    for row_start in range(0, len(_FEATURE_CARDS), _COLS_PER_ROW):
-        row_cards = _FEATURE_CARDS[row_start : row_start + _COLS_PER_ROW]
+    for row_start in range(0, len(HOME_CARDS), _COLS_PER_ROW):
+        row_cards = HOME_CARDS[row_start : row_start + _COLS_PER_ROW]
         cols = st.columns(_COLS_PER_ROW)
         for col, card in zip(cols, row_cards):
             with col:

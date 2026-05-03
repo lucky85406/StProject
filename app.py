@@ -23,6 +23,8 @@ from core.qr_login import generate_qr_image, build_confirm_url
 from core.session_store import create_session, verify_session, delete_session
 from core.users import verify_password, get_user_id
 
+from config.pages import PAGE_CONFIG, PAGE_MAP
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  全域 Log 設定
 #  格式：時間戳 + 層級 + 模組名稱 + 訊息
@@ -667,6 +669,7 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
             background:linear-gradient(145deg,#f0f4ff 0%,#faf5ff 50%,#fff0f9 100%);
             padding:2rem 1rem;
             display:flex;align-items:flex-start;justify-content:center;
+            height:420px;overflow:hidden;
         }}
         .card{{
             background:#fff;border:1px solid rgba(124,111,247,.20);
@@ -729,14 +732,30 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
                 if (numEl) numEl.textContent = count;
                 if (count <= 0) {{
                     clearInterval(timer);
-                    try {{ window.top.location.replace('about:blank'); }} catch(e1) {{
-                        try {{ window.parent.location.replace('about:blank'); }} catch(e2) {{
-                            try {{ window.location.replace('about:blank'); }} catch(e3) {{}}
-                            hintEl.style.display = 'block';
-                            if (numEl) {{
-                                numEl.textContent = '✓';
-                                numEl.style.animation = 'none';
+                    /* st.html() 直接在主頁面執行，window 即分頁本身 */
+                    /* OAuth flow 由 window.open() 開啟的分頁，window.close() 可直接關閉 */
+                    var closed = false;
+                    try {{
+                        window.close();
+                        /* 給瀏覽器 300ms 執行關閉，若分頁仍存在則 fallback */
+                        setTimeout(function() {{
+                            if (!closed) {{
+                                try {{
+                                    window.location.replace('about:blank');
+                                }} catch(e) {{
+                                    if (hintEl) hintEl.style.display = 'block';
+                                }}
+                                if (numEl) {{
+                                    numEl.textContent = '✓';
+                                    numEl.style.animation = 'none';
+                                }}
                             }}
+                        }}, 300);
+                    }} catch(e) {{
+                        if (hintEl) hintEl.style.display = 'block';
+                        if (numEl) {{
+                            numEl.textContent = '✓';
+                            numEl.style.animation = 'none';
                         }}
                     }}
                 }}
@@ -746,11 +765,9 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
         </body>
         </html>"""
 
-        import streamlit.components.v1 as components
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            components.html(_success_html, height=420, scrolling=False)
+        # ✅ 新 API，一行搞定，警告徹底消失
+        st.html(_success_html, unsafe_allow_javascript=True)
 
         st.stop()
 
@@ -921,6 +938,81 @@ def _show_totp_enrollment() -> None:
             st.rerun()
 
 
+def _render_login_tab_bar() -> None:
+    """
+    自訂登入頁 Tab Bar。
+    用 session_state 追蹤當前 tab，點擊時觸發 rerun 切換內容。
+    """
+    # 注入 Tab Bar CSS（只需注入一次，寫在 LOGIN_CSS 裡也可以）
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stHorizontalBlock"]:has(.login-tab-btn) {
+            gap: 0 !important;
+        }
+        .login-tab-btn button {
+            border: none !important;
+            border-bottom: 3px solid transparent !important;
+            border-radius: 0 !important;
+            background: transparent !important;
+            color: #8b85a8 !important;
+            font-size: 0.88rem !important;
+            font-weight: 600 !important;
+            padding: 6px 0 8px !important;
+            width: 100% !important;
+            transition: color .2s, border-color .2s !important;
+        }
+        .login-tab-btn button:hover {
+            color: #7c6ff7 !important;
+            border-bottom-color: rgba(124,111,247,.35) !important;
+        }
+        .login-tab-active button {
+            color: #7c6ff7 !important;
+            border-bottom-color: #7c6ff7 !important;
+        }
+        .login-tab-divider {
+            border: none;
+            border-top: 1px solid rgba(124,111,247,.15);
+            margin: 0 0 1.2rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    active = st.session_state.active_login_tab
+    col_pw, col_qr = st.columns(2)
+
+    with col_pw:
+        # active tab 用 class 標記，非 active 才需要點擊切換
+        css_class = (
+            "login-tab-btn login-tab-active"
+            if active == "password"
+            else "login-tab-btn"
+        )
+        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+        if st.button("🔐 帳號密碼", key="tab_btn_pw", use_container_width=True):
+            if active != "password":
+                # 離開 QR tab → 清除 token，停止無效輪詢
+                st.session_state.pop("qr_token_id", None)
+                st.session_state.active_login_tab = "password"
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_qr:
+        css_class = (
+            "login-tab-btn login-tab-active" if active == "qr" else "login-tab-btn"
+        )
+        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+        if st.button("📱 QR Code 掃描登入", key="tab_btn_qr", use_container_width=True):
+            if active != "qr":
+                st.session_state.active_login_tab = "qr"
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<hr class='login-tab-divider'>", unsafe_allow_html=True)
+
+
 def show_login() -> None:
     log_section("LOGIN PAGE")
     logger.info("顯示登入畫面")
@@ -928,6 +1020,8 @@ def show_login() -> None:
     st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
     st.markdown(LOGIN_CSS, unsafe_allow_html=True)
 
+    if "active_login_tab" not in st.session_state:
+        st.session_state.active_login_tab = "password"
     _, col, _ = st.columns([1, 1.4, 1])
     with col:
         st.markdown(
@@ -941,10 +1035,11 @@ def show_login() -> None:
             unsafe_allow_html=True,
         )
 
-        tab_pw, tab_qr = st.tabs(["🔐 帳號密碼", "📱 QR Code 掃描登入"])
+        # ── 自訂 Tab Bar ─────────────────────────────────────────
+        _render_login_tab_bar()
 
         # ── Tab 1：帳號密碼 + TOTP 登入 ──────────────────────────
-        with tab_pw:
+        if st.session_state.active_login_tab == "password":
             with st.form("login_form", clear_on_submit=False):
                 username = st.text_input("👤  帳號", placeholder="請輸入帳號")
                 password = st.text_input(
@@ -955,23 +1050,20 @@ def show_login() -> None:
                     placeholder="6 位數驗證碼（未啟用可留空）",
                     max_chars=6,
                 )
-                submit = st.form_submit_button("登 入", width='stretch')
+                submit = st.form_submit_button("登 入", use_container_width=True)
 
             if submit:
-                from core.users import verify_login, get_totp_info  # 確保使用新版函式
+                from core.users import verify_login, get_totp_info
 
                 logger.info("登入嘗試 ─ user=%s", username)
                 ok, reason = verify_login(username, password, totp_code)
                 if ok:
-                    # ── 檢查是否已設定 TOTP ──────────────────────
                     totp_enabled, _ = get_totp_info(username)
                     if not totp_enabled:
-                        # 首次使用：導向 TOTP 強制設定閘門
                         st.session_state.totp_enrolling_user = username
                         logger.info("首次 TOTP 設定引導 ─ user=%s", username)
                         st.rerun()
                     else:
-                        # 已設定 TOTP → 正常建立 session
                         sid = create_session(username)
                         user_id = get_user_id(username)
                         st.session_state.update(
@@ -992,9 +1084,10 @@ def show_login() -> None:
                     }
                     logger.warning("登入失敗 ─ user=%s  reason=%s", username, reason)
                     st.error(_LOGIN_ERRORS.get(reason, "登入失敗，請稍後再試。"))
-        # ── Tab 2：QR Code 登入 ──────────────────────────────────
-        with tab_qr:
-            _show_qr_login_tab()
+
+        # ── Tab 2：QR Code 登入（只有選中時才掛載）────────────────
+        elif st.session_state.active_login_tab == "qr":
+            _show_qr_login_tab()  # fragment 在此才被建立，run_every 才開始計時
 
 
 def _show_qr_login_tab() -> None:
@@ -1128,219 +1221,6 @@ def _render_status_indicator(status: str) -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  頁面設定清單（上半部導覽 + 下半部參數面板定義）
-# ══════════════════════════════════════════════════════════════════════════════
-
-PAGE_CONFIG: list[dict[str, Any]] = [
-    {
-        "id": "home",
-        "icon": "🏠",
-        "label": "首頁",
-        "title": "系統首頁",
-        "subtitle": "歡迎使用 Bllln Web 管理平台",
-        "module": "pages.home",
-        "params": [],  # 首頁無側邊欄參數
-    },
-    {
-        "id": "daily_expense",
-        "icon": "💰",
-        "label": "消費",
-        "title": "每日消費記錄",
-        "subtitle": "快速記帳 · 今日總覽 · 預算追蹤",
-        "module": "pages.daily_expense",
-        "params": [],  # 此頁無側邊欄參數
-    },
-    {
-        "id": "dashboard",
-        "icon": "📊",
-        "label": "儀表板",
-        "title": "資料儀表板",
-        "subtitle": "圖表分析與關鍵指標總覽",
-        "module": "pages.dashboard",
-        "params": [
-            {
-                "type": "selectbox",
-                "key": "dash_range",
-                "label": "時間範圍",
-                "options": ["最近 7 天", "最近 30 天", "最近 90 天", "本年度"],
-                "default": 0,
-            },
-            {
-                "type": "selectbox",
-                "key": "dash_chart",
-                "label": "圖表類型",
-                "options": ["折線圖", "長條圖", "面積圖"],
-                "default": 0,
-            },
-            {
-                "type": "checkbox",
-                "key": "dash_animate",
-                "label": "啟用動態效果",
-                "default": True,
-            },
-        ],
-    },
-    {
-        "id": "crawler",
-        "icon": "🕸",
-        "label": "爬蟲",
-        "title": "網頁爬蟲工作台",
-        "subtitle": "資料搜集、彙整分析與二階段 Pipeline",
-        "module": "pages.crawler_dashboard",
-        "params": [
-            {
-                "type": "number",
-                "key": "crawl_concurrency",
-                "label": "最大並發數",
-                "min": 1,
-                "max": 10,
-                "default": 3,
-            },
-            {
-                "type": "slider",
-                "key": "crawl_delay",
-                "label": "請求延遲 (秒)",
-                "min": 0.5,
-                "max": 5.0,
-                "step": 0.5,
-                "default": 1.5,
-            },
-            {
-                "type": "number",
-                "key": "crawl_timeout",
-                "label": "逾時時間 (秒)",
-                "min": 5,
-                "max": 60,
-                "default": 15,
-            },
-            {
-                "type": "number",
-                "key": "crawl_retries",
-                "label": "最大重試次數",
-                "min": 0,
-                "max": 10,
-                "default": 3,
-            },
-            {
-                "type": "checkbox",
-                "key": "crawl_robots",
-                "label": "遵守 robots.txt",
-                "default": True,
-            },
-        ],
-    },
-    {
-        "id": "upscaler",
-        "icon": "🖼",
-        "label": "超解析度",
-        "title": "AI 圖像超解析度",
-        "subtitle": "GPU 加速 · PyTorch EDSR · 人像細節強化",
-        "module": "pages.image_upscaler",
-        "params": [
-            {
-                "type": "selectbox",
-                "key": "up_model",
-                "label": "AI 模型",
-                "options": ["EDSR", "ESPCN", "FSRCNN", "LapSRN"],
-                "default": 0,
-            },
-            {
-                "type": "selectbox",
-                "key": "up_scale",
-                "label": "放大倍數",
-                "options": ["2×", "3×", "4×"],
-                "default": 0,
-            },
-            {
-                "type": "checkbox",
-                "key": "up_gpu",
-                "label": "啟用 GPU 加速",
-                "default": True,
-            },
-            {
-                "type": "checkbox",
-                "key": "up_portrait",
-                "label": "人像細節強化模式",
-                "default": False,
-            },
-            {
-                "type": "slider",
-                "key": "up_sharpen",
-                "label": "銳化強度",
-                "min": 0.0,
-                "max": 3.0,
-                "step": 0.1,
-                "default": 1.2,
-            },
-        ],
-    },
-    {
-        "id": "ocr_scanner",
-        "icon": "🔍",
-        "label": "OCR",
-        "title": "OCR 文字辨識",
-        "subtitle": "圖像文字提取 · 多語言支援 · PDF 批次解析",
-        "module": "pages.ocr_scanner",
-        "params": [
-            {
-                "type": "selectbox",
-                "key": "ocr_lang",
-                "label": "辨識語言",
-                "options": ["繁體中文+英文", "英文", "日文+英文", "韓文+英文"],
-                "default": 0,
-            },
-            {
-                "type": "slider",
-                "key": "ocr_confidence",
-                "label": "最低信心度",
-                "min": 0.1,
-                "max": 1.0,
-                "step": 0.05,
-                "default": 0.5,
-            },
-            {
-                "type": "checkbox",
-                "key": "ocr_preprocess",
-                "label": "啟用圖像預處理",
-                "default": True,
-            },
-            {
-                "type": "checkbox",
-                "key": "ocr_deskew",
-                "label": "自動傾斜校正",
-                "default": True,
-            },
-            {
-                "type": "checkbox",
-                "key": "ocr_gpu",
-                "label": "啟用 GPU 加速",
-                "default": True,
-            },
-            {
-                "type": "selectbox",
-                "key": "ocr_pdf_dpi",
-                "label": "PDF 渲染 DPI",
-                "options": ["150 DPI", "200 DPI", "300 DPI"],
-                "default": 1,
-            },
-        ],
-    },
-    {
-        "id": "settings",
-        "icon": "⚙️",
-        "label": "設定",
-        "title": "系統設定",
-        "subtitle": "個人資料、密碼修改與外觀偏好",
-        "module": "pages.settings",
-        "params": [],
-    },
-]
-
-# 建立 id → config 的快速查找字典
-PAGE_MAP: dict[str, dict] = {p["id"]: p for p in PAGE_CONFIG}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
