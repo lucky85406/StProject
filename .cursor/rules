@@ -10,6 +10,7 @@ Feat / Fix / Refactor / Perf / Style / Docs / Test / Chore
 
 ## Rules
 - Output in English only
+- The first letter must be a capital letter
 - Subject line must be under 72 characters
 - Use present tense ("Add", "Fix", "Update", not "Added", "Fixed")
 - No body, no footer, single line only

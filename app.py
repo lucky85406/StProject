@@ -940,75 +940,75 @@ def _show_totp_enrollment() -> None:
 
 def _render_login_tab_bar() -> None:
     """
-    自訂登入頁 Tab Bar。
-    用 session_state 追蹤當前 tab，點擊時觸發 rerun 切換內容。
+    使用 st.container(key=) 產生的 .st-key-* CSS class 作用域，
+    透過 nth-child 定位各 tab 按鈕，完全不需要 HTML div 包裹 st.button。
     """
-    # 注入 Tab Bar CSS（只需注入一次，寫在 LOGIN_CSS 裡也可以）
+    active = st.session_state.active_login_tab
+
+    # active tab 對應第幾個 column（nth-child 從 1 起算）
+    active_nth = "1" if active == "password" else "2"
+
+    # ── CSS 注入：base 樣式 + Python 端動態決定 active 樣式 ──────
     st.markdown(
-        """
+        f"""
         <style>
-        div[data-testid="stHorizontalBlock"]:has(.login-tab-btn) {
-            gap: 0 !important;
-        }
-        .login-tab-btn button {
+        /* 作用域：st.container(key="login_tab_bar") 自動產生此 class */
+        .st-key-login_tab_bar {{
+            margin-bottom: 0 !important;
+        }}
+        /* 所有 tab 按鈕 base 樣式 */
+        .st-key-login_tab_bar button {{
             border: none !important;
             border-bottom: 3px solid transparent !important;
             border-radius: 0 !important;
             background: transparent !important;
+            box-shadow: none !important;
             color: #8b85a8 !important;
             font-size: 0.88rem !important;
             font-weight: 600 !important;
             padding: 6px 0 8px !important;
             width: 100% !important;
             transition: color .2s, border-color .2s !important;
-        }
-        .login-tab-btn button:hover {
+        }}
+        .st-key-login_tab_bar button:hover {{
             color: #7c6ff7 !important;
             border-bottom-color: rgba(124,111,247,.35) !important;
-        }
-        .login-tab-active button {
+            background: transparent !important;
+            transform: translateY(-3px) !important;
+        }}
+        /* Active tab：Python 根據 session_state 動態注入 nth-child */
+        .st-key-login_tab_bar [data-testid="column"]:nth-child({active_nth}) button {{
             color: #7c6ff7 !important;
             border-bottom-color: #7c6ff7 !important;
-        }
-        .login-tab-divider {
+        }}
+        .login-tab-divider {{
             border: none;
             border-top: 1px solid rgba(124,111,247,.15);
             margin: 0 0 1.2rem;
-        }
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    active = st.session_state.active_login_tab
-    col_pw, col_qr = st.columns(2)
+    # ── Tab Bar 本體：container key 產生 CSS 作用域 ───────────────
+    with st.container(key="login_tab_bar"):
+        col_pw, col_qr = st.columns(2)
 
-    with col_pw:
-        # active tab 用 class 標記，非 active 才需要點擊切換
-        css_class = (
-            "login-tab-btn login-tab-active"
-            if active == "password"
-            else "login-tab-btn"
-        )
-        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-        if st.button("🔐 帳號密碼", key="tab_btn_pw", use_container_width=True):
-            if active != "password":
-                # 離開 QR tab → 清除 token，停止無效輪詢
-                st.session_state.pop("qr_token_id", None)
-                st.session_state.active_login_tab = "password"
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+        with col_pw:
+            if st.button("🔐 帳號密碼", key="tab_btn_pw", use_container_width=True):
+                if active != "password":
+                    st.session_state.pop("qr_token_id", None)
+                    st.session_state.active_login_tab = "password"
+                    st.rerun()
 
-    with col_qr:
-        css_class = (
-            "login-tab-btn login-tab-active" if active == "qr" else "login-tab-btn"
-        )
-        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-        if st.button("📱 QR Code 掃描登入", key="tab_btn_qr", use_container_width=True):
-            if active != "qr":
-                st.session_state.active_login_tab = "qr"
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+        with col_qr:
+            if st.button(
+                "📱 QR Code 掃描登入", key="tab_btn_qr", use_container_width=True
+            ):
+                if active != "qr":
+                    st.session_state.active_login_tab = "qr"
+                    st.rerun()
 
     st.markdown("<hr class='login-tab-divider'>", unsafe_allow_html=True)
 
