@@ -47,6 +47,16 @@ _FEATURE_CARDS: list[dict] = [
         "border_soft": "rgba(232,121,160,0.22)",
     },
     {
+        "id": "ocr_scanner",
+        "icon": "🔍",
+        "label": "OCR",
+        "title": "OCR 文字辨識",
+        "desc": "圖像文字提取 · 多語言支援 · PDF 批次解析",
+        "accent": "#4982A6",
+        "accent_soft": "rgba(73,130,166,0.10)",
+        "border_soft": "rgba(73,130,166,0.22)",
+    },
+    {
         "id": "settings",
         "icon": "⚙️",
         "title": "系統設定",
@@ -131,7 +141,7 @@ def show() -> None:
                 if st.button(
                     f"前往 {card['title']} →",
                     key=f"home_nav_{card['id']}",
-                    use_container_width=True,
+                    width='stretch',
                 ):
                     logger.info("首頁導覽卡片點擊 → %s", card["id"])
                     _navigate_to(card["id"])

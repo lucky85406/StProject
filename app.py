@@ -602,7 +602,7 @@ if _qr_confirm_token and not st.session_state.get("logged_in"):
 
             if st.button(
                 "✅ 驗證並登入",
-                use_container_width=True,
+                width='stretch',
                 type="primary",
                 key="qr_device_confirm_btn",
             ):
@@ -880,10 +880,10 @@ def _show_totp_enrollment() -> None:
             col_submit, col_cancel = st.columns([2, 1])
             with col_submit:
                 submitted = st.form_submit_button(
-                    "✅ 完成設定，進入系統", use_container_width=True, type="primary"
+                    "✅ 完成設定，進入系統", width='stretch', type="primary"
                 )
             with col_cancel:
-                cancelled = st.form_submit_button("← 返回", use_container_width=True)
+                cancelled = st.form_submit_button("← 返回", width='stretch')
 
         if submitted:
             if verify_code(secret, confirm_code):
@@ -955,7 +955,7 @@ def show_login() -> None:
                     placeholder="6 位數驗證碼（未啟用可留空）",
                     max_chars=6,
                 )
-                submit = st.form_submit_button("登 入", use_container_width=True)
+                submit = st.form_submit_button("登 入", width='stretch')
 
             if submit:
                 from core.users import verify_login, get_totp_info  # 確保使用新版函式
@@ -1278,6 +1278,57 @@ PAGE_CONFIG: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "ocr_scanner",
+        "icon": "🔍",
+        "label": "OCR",
+        "title": "OCR 文字辨識",
+        "subtitle": "圖像文字提取 · 多語言支援 · PDF 批次解析",
+        "module": "pages.ocr_scanner",
+        "params": [
+            {
+                "type": "selectbox",
+                "key": "ocr_lang",
+                "label": "辨識語言",
+                "options": ["繁體中文+英文", "英文", "日文+英文", "韓文+英文"],
+                "default": 0,
+            },
+            {
+                "type": "slider",
+                "key": "ocr_confidence",
+                "label": "最低信心度",
+                "min": 0.1,
+                "max": 1.0,
+                "step": 0.05,
+                "default": 0.5,
+            },
+            {
+                "type": "checkbox",
+                "key": "ocr_preprocess",
+                "label": "啟用圖像預處理",
+                "default": True,
+            },
+            {
+                "type": "checkbox",
+                "key": "ocr_deskew",
+                "label": "自動傾斜校正",
+                "default": True,
+            },
+            {
+                "type": "checkbox",
+                "key": "ocr_gpu",
+                "label": "啟用 GPU 加速",
+                "default": True,
+            },
+            {
+                "type": "selectbox",
+                "key": "ocr_pdf_dpi",
+                "label": "PDF 渲染 DPI",
+                "options": ["150 DPI", "200 DPI", "300 DPI"],
+                "default": 1,
+            },
+        ],
+    },
+    {
         "id": "settings",
         "icon": "⚙️",
         "label": "設定",
@@ -1438,7 +1489,7 @@ def render_sidebar(active_id: str) -> str:
 
         # ── 登出按鈕（下一列，secondary type，CSS 精確定位）─────────
         if logout_clicked := side_logout.button(
-            "🚪  登出", key="logout_btn", use_container_width=True
+            "🚪  登出", key="logout_btn", width='stretch'
         ):
             logger.info("使用者登出 ─ user=%s", st.session_state.get("username"))
             delete_session(st.session_state.sid)
@@ -1464,7 +1515,7 @@ def render_sidebar(active_id: str) -> str:
                     if st.button(
                         f"{page['icon']}\n{page['label']}",
                         key=f"nav_{page['id']}",
-                        use_container_width=True,
+                        width='stretch',
                         help=page["title"],
                         type="secondary",  # ← secondary，避開 primaryColor 鎖定
                     ):

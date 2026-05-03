@@ -86,7 +86,7 @@ def _tab_general() -> None:
         )
         email = st.text_input("電子郵件", placeholder="example@email.com")
         bio = st.text_area("個人簡介", placeholder="簡單描述自己...", height=80)
-        submitted_profile = st.form_submit_button("儲存變更", use_container_width=True)
+        submitted_profile = st.form_submit_button("儲存變更", width='stretch')
 
     if submitted_profile:
         logger.info(
@@ -104,7 +104,7 @@ def _tab_general() -> None:
         old_pw = st.text_input("舊密碼", type="password")
         new_pw = st.text_input("新密碼", type="password")
         confirm_pw = st.text_input("確認新密碼", type="password")
-        submitted_pw = st.form_submit_button("更新密碼", use_container_width=True)
+        submitted_pw = st.form_submit_button("更新密碼", width='stretch')
 
     if submitted_pw:
         if not old_pw:
@@ -132,7 +132,7 @@ def _tab_general() -> None:
     with col2:
         lang = st.selectbox("語言", ["繁體中文", "English", "日本語"])
 
-    if st.button("套用外觀設定", use_container_width=True):
+    if st.button("套用外觀設定", width='stretch'):
         logger.info("外觀設定套用 ─ theme=%s  lang=%s", theme, lang)
         st.info(f"🎨 已套用：{theme}、{lang}（示範模式）")
 
@@ -195,7 +195,7 @@ def _tab_budget() -> None:
             value=budget.is_active if budget else True,
             help="關閉後仍會記錄消費，但不顯示超標提示。",
         )
-        submitted = st.form_submit_button("💾 儲存預算設定", use_container_width=True)
+        submitted = st.form_submit_button("💾 儲存預算設定", width='stretch')
 
     if submitted:
         from decimal import Decimal
@@ -250,7 +250,7 @@ def _render_icon_picker(form_key: str) -> str:
                     icon,
                     key=f"{form_key}_icon_{icon}",
                     type="primary" if is_sel else "secondary",
-                    use_container_width=True,
+                    width='stretch',
                 ):
                     st.session_state[state_key] = icon
                     st.rerun()
@@ -323,7 +323,7 @@ def _tab_categories() -> None:
                         "✓",
                         key=f"cat_del_ok_{cat.id}",
                         help="確認刪除",
-                        use_container_width=True,
+                        width='stretch',
                         type="primary",
                     ):
                         ok = delete_category(cat.id)
@@ -341,7 +341,7 @@ def _tab_categories() -> None:
                         "🗑️",
                         key=f"cat_del_{cat.id}_btn",
                         help=f"刪除「{cat.name}」",
-                        use_container_width=True,
+                        width='stretch',
                     ):
                         st.session_state[del_flag] = True
                         st.rerun()
@@ -363,7 +363,7 @@ def _tab_categories() -> None:
 
         if st.button(
             "➕ 新增類別",
-            use_container_width=True,
+            width='stretch',
             type="primary",
             key="new_cat_submit",
         ):

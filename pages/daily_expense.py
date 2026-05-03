@@ -410,7 +410,7 @@ def _render_add_form(categories: list[Category], user_id: str) -> bool:
                     if st.button(
                         f"{cat.icon}\n{cat.name}",
                         key=f"cat_sel_{cat.id}",
-                        use_container_width=True,
+                        width='stretch',
                         type="primary" if is_selected else "secondary",
                     ):
                         st.session_state.exp_selected_cat_name = (
@@ -431,7 +431,7 @@ def _render_add_form(categories: list[Category], user_id: str) -> bool:
         )
 
     if not st.button(
-        "✅ 確認新增", use_container_width=True, type="primary", key="exp_submit"
+        "✅ 確認新增", width='stretch', type="primary", key="exp_submit"
     ):
         return False
 
@@ -576,7 +576,7 @@ def _render_edit_form(exp: Expense, categories: list[Category], user_id: str) ->
     col_save, col_cancel = st.columns(2)
     with col_save:
         if st.button(
-            "💾 儲存", key=f"{edit_key}_save", use_container_width=True, type="primary"
+            "💾 儲存", key=f"{edit_key}_save", width='stretch', type="primary"
         ):
             try:
                 amount_dec = Decimal(str(new_amount))
@@ -609,7 +609,7 @@ def _render_edit_form(exp: Expense, categories: list[Category], user_id: str) ->
                 return True
             st.error("❌ 儲存失敗，請稍後再試。")
     with col_cancel:
-        if st.button("✕ 取消", key=f"{edit_key}_cancel", use_container_width=True):
+        if st.button("✕ 取消", key=f"{edit_key}_cancel", width='stretch'):
             st.rerun()
 
     return False
@@ -674,7 +674,7 @@ def _tab_history(categories: list[Category], user_id: str) -> None:
             # 對齊 label 高度
             st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
             if st.button(
-                "↺ 重設", help="重設為本週", use_container_width=True, key="hist_reset"
+                "↺ 重設", help="重設為本週", width='stretch', key="hist_reset"
             ):
                 for k in ("hist_start", "hist_end", "hist_cat_filter"):
                     st.session_state.pop(k, None)
@@ -740,7 +740,7 @@ def _tab_history(categories: list[Category], user_id: str) -> None:
             with col_actions:
                 edit_flag = f"show_edit_{exp.id}"
                 if st.button(
-                    "✏️ 編輯", key=f"edit_btn_{exp.id}", use_container_width=True
+                    "✏️ 編輯", key=f"edit_btn_{exp.id}", width='stretch'
                 ):
                     st.session_state[edit_flag] = not st.session_state.get(
                         edit_flag, False
@@ -752,7 +752,7 @@ def _tab_history(categories: list[Category], user_id: str) -> None:
                     if st.button(
                         "⚠️ 確認刪除",
                         key=f"hist_del_ok_{exp.id}",
-                        use_container_width=True,
+                        width='stretch',
                         type="primary",
                     ):
                         if soft_delete_expense(exp.id):
@@ -761,7 +761,7 @@ def _tab_history(categories: list[Category], user_id: str) -> None:
                             st.rerun()
                 else:
                     if st.button(
-                        "🗑️ 刪除", key=f"hist_del_{exp.id}_btn", use_container_width=True
+                        "🗑️ 刪除", key=f"hist_del_{exp.id}_btn", width='stretch'
                     ):
                         st.session_state[del_flag] = True
                         st.rerun()
