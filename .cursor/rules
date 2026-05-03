@@ -3,10 +3,10 @@
 When generating commit messages, always follow this format strictly:
 
 ## Format
-<type>(<file>): <what was done>
+<Type>(<file>): <what was done>
 
 ## Types
-feat / fix / refactor / perf / style / docs / test / chore
+Feat / Fix / Refactor / Perf / Style / Docs / Test / Chore
 
 ## Rules
 - Output in English only
