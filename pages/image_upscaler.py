@@ -991,7 +991,7 @@ def render_merge_tab() -> None:
             f"text-align:center;padding-top:24px'>{rank + 1}</div>",
             unsafe_allow_html=True,
         )
-        c_img.image(img, use_container_width=True)
+        c_img.image(img, width='stretch')
         c_info.markdown(f"**{fname}**")
         c_info.caption(f"{img.width} × {img.height} px")
 
@@ -1044,7 +1044,7 @@ def render_merge_tab() -> None:
     if st.button(
         "🔗 執行合併",
         type="primary",
-        use_container_width=True,
+        width='stretch',
         key="merge_execute_btn",
     ):
         ordered_imgs = [images[i] for i in order]
@@ -1063,7 +1063,7 @@ def render_merge_tab() -> None:
         st.image(
             result_img,
             caption=f"合併結果 — {result_img.width} × {result_img.height} px",
-            use_container_width=True,
+            width='stretch',
         )
 
         m1, m2, m3 = st.columns(3)
@@ -1078,14 +1078,14 @@ def render_merge_tab() -> None:
             data=image_to_bytes(result_img, "PNG"),
             file_name="merged_output.png",
             mime="image/png",
-            use_container_width=True,
+            width='stretch',
         )
         dl2.download_button(
             "⬇️ 下載 JPEG（壓縮）",
             data=image_to_bytes(result_img, "JPEG"),
             file_name="merged_output.jpg",
             mime="image/jpeg",
-            use_container_width=True,
+            width='stretch',
         )
 
 
@@ -1104,7 +1104,7 @@ def _render_upscaler_content() -> None:
                 cv1, cv2 = st.columns(2)
                 cv1.metric("總 VRAM", device_info["vram"])
                 cv2.metric("已用 VRAM", device_info["vram_used"])
-                if st.button("🧹 釋放 GPU 快取", key="_uc_clear_gpu", use_container_width=True):
+                if st.button("🧹 釋放 GPU 快取", key="_uc_clear_gpu", width='stretch'):
                     torch.cuda.empty_cache()
                     st.success("✅ GPU 快取已清除")
                     st.rerun()
@@ -1132,7 +1132,7 @@ def _render_upscaler_content() -> None:
                 key="_uc_model_select",
             )
             prog_ph = st.empty()
-            if st.button("⬇️ 下載模型", key="_uc_download_btn", use_container_width=True):
+            if st.button("⬇️ 下載模型", key="_uc_download_btn", width='stretch'):
                 if download_model(model_sel, prog_ph):
                     st.cache_resource.clear()
                     st.rerun()
@@ -1199,7 +1199,7 @@ def _render_upscaler_content() -> None:
         ]
         col_select, col_add = st.columns([3, 1])
         new_node_name = col_select.selectbox("新增節點類型", node_options, key="new_node_type")
-        if col_add.button("＋ 新增", key="_uc_add_node", use_container_width=True):
+        if col_add.button("＋ 新增", key="_uc_add_node", width='stretch'):
             defaults: dict[str, dict] = {
                 "AI 超解析度": {"model": "EDSR", "scale": 4},
                 "雙三次插值升解析度": {"scale": 2},
@@ -1236,14 +1236,14 @@ def _render_upscaler_content() -> None:
             st.image(
                 original_pil,
                 caption=f"原始圖片 — {original_pil.width}×{original_pil.height}px",
-                use_container_width=True,
+                width='stretch',
             )
             st.divider()
 
             if st.button(
                 "🚀 執行工作流",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
                 key="_uc_run_btn",
             ):
                 enabled_count = sum(1 for nd in st.session_state.pipeline_nodes if nd.enabled)
@@ -1265,7 +1265,7 @@ def _render_upscaler_content() -> None:
                             f"處理結果 — "
                             f"{run_result.output_size[0]}×{run_result.output_size[1]}px"
                         ),
-                        use_container_width=True,
+                        width='stretch',
                     )
                     m1, m2, m3, m4, m5 = st.columns(5)
                     orig_w, orig_h = run_result.original_size
@@ -1284,14 +1284,14 @@ def _render_upscaler_content() -> None:
                         data=image_to_bytes(run_result.image, "PNG"),
                         file_name="upscaled_output.png",
                         mime="image/png",
-                        use_container_width=True,
+                        width='stretch',
                     )
                     dl2.download_button(
                         "⬇️ 下載 JPEG（壓縮）",
                         data=image_to_bytes(run_result.image, "JPEG"),
                         file_name="upscaled_output.jpg",
                         mime="image/jpeg",
-                        use_container_width=True,
+                        width='stretch',
                     )
         else:
             st.info("👆 請上傳圖片後設定工作流，再點擊「執行工作流」")

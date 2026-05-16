@@ -996,7 +996,7 @@ def _render_login_tab_bar() -> None:
         col_pw, col_qr = st.columns(2)
 
         with col_pw:
-            if st.button("🔐 帳號密碼", key="tab_btn_pw", use_container_width=True):
+            if st.button("🔐 帳號密碼", key="tab_btn_pw", width='stretch'):
                 if active != "password":
                     st.session_state.pop("qr_token_id", None)
                     st.session_state.active_login_tab = "password"
@@ -1004,7 +1004,7 @@ def _render_login_tab_bar() -> None:
 
         with col_qr:
             if st.button(
-                "📱 QR Code 掃描登入", key="tab_btn_qr", use_container_width=True
+                "📱 QR Code 掃描登入", key="tab_btn_qr", width='stretch'
             ):
                 if active != "qr":
                     st.session_state.active_login_tab = "qr"
@@ -1050,7 +1050,7 @@ def show_login() -> None:
                     placeholder="6 位數驗證碼（未啟用可留空）",
                     max_chars=6,
                 )
-                submit = st.form_submit_button("登 入", use_container_width=True)
+                submit = st.form_submit_button("登 入", width='stretch')
 
             if submit:
                 from core.users import verify_login, get_totp_info

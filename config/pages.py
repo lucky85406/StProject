@@ -23,6 +23,7 @@ app.py（側欄導覽 + Hero）與 pages/home.py（首頁卡片）會自動
 params 每個元素為 dict，type 可為：
   selectbox | checkbox | slider | number
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -271,6 +272,48 @@ PAGE_CONFIG: list[dict[str, Any]] = [
         "module": "pages.settings",
         "show_in_home": True,
         "params": [],
+    },
+    # 在 PAGE_CONFIG list 中新增（建議放在 image_upscaler 之後）
+    {
+        "id": "image_outpainter",
+        "icon": "🪄",
+        "label": "AI 橫式轉換",
+        "title": "AI 直式→橫式轉換",
+        "subtitle": "ControlNet-Union + SDXL Fill Pipeline，AI 智慧補全橫向內容",
+        "module": "pages.image_outpainter",
+        "params": [
+            {
+                "key": "outpaint_ratio",
+                "label": "目標比例",
+                "type": "selectbox",
+                "options": ["16:9", "4:3", "21:9", "1:1"],
+                "default": 0,  # 16:9
+            },
+            {
+                "key": "outpaint_align",
+                "label": "原圖對齊方式",
+                "type": "selectbox",
+                "options": ["Middle", "Left", "Right"],
+                "default": 0,  # Middle
+            },
+            {
+                "key": "outpaint_overlap",
+                "label": "邊緣混合帶 (%)",
+                "type": "slider",
+                "min": 5.0,
+                "max": 25.0,
+                "step": 1.0,
+                "default": 10.0,
+            },
+            {
+                "key": "outpaint_steps",
+                "label": "推理步數",
+                "type": "number",
+                "min": 4,
+                "max": 12,
+                "default": 8,
+            },
+        ],
     },
     # ════════════════════════════════════════════════════════════════
     # 新增功能頁範本（複製貼上後修改即可）

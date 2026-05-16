@@ -12,3 +12,5 @@ models/
 *.pt
 *.onnx
 *.weights
+controlnet_union.py
+pipeline_fill_sd_xl.py
