@@ -8,7 +8,7 @@ AI Outpainting 核心推理引擎
 設計原則：
   - 無 Streamlit 依賴，可獨立單元測試
   - Pipeline 單例管理，避免重複載入 VRAM
-  - 與 image_upscaler.py 相同的快取模式
+  - cos 漸進式遮罩，自然銜接肢體末端
 """
 
 from __future__ import annotations
@@ -16,10 +16,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generator, Literal
+from typing import Literal
 
+import numpy as np
 import torch
-from diffusers import AutoencoderKL, StableDiffusionXLInpaintPipeline, TCDScheduler
+from diffusers import (
+    AutoencoderKL,
+    DPMSolverMultistepScheduler,
+    StableDiffusionXLInpaintPipeline,
+)
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 log = logging.getLogger("core.outpaint_engine")
@@ -44,16 +49,19 @@ class OutpaintConfig:
     alignment: Literal["Middle", "Left", "Right"] = "Middle"
 
     # 邊緣 overlap 混合帶 (%)，建議 8~15
-    overlap_pct: int = 10
+    overlap_pct: int = 8
 
-    # 推理步數（TCD Scheduler 建議 4~12）
-    num_inference_steps: int = 8
+    # 推理步數（DPMSolver++ 建議 20~30）
+    num_inference_steps: int = 30
 
-    # 補全強度（outpainting 必須 >= 0.9）
+    # 補全強度（outpainting 必須 1.0）
     strength: float = 1.0
 
     # 輔助提示詞（空 = 讓模型自行判斷）
     prompt: str = ""
+
+    # 由頁面注入的場景負向詞
+    scene_negative: str = ""
 
     # 裝置自動偵測
     device: str = field(
@@ -66,35 +74,28 @@ class OutpaintConfig:
     )
 
     def canvas_size(self) -> tuple[int, int]:
-        """依 target_ratio 計算目標畫布尺寸，自動對齊為 8 的倍數"""
+        """
+        推理用畫布尺寸（以 1024 為基準，SDXL 最佳推理解析度）
+        推理後由 output_size() upscale 至最終尺寸
+        """
         ratio_map: dict[str, tuple[int, int]] = {
-            "16:9":  (1820, 1024),
-            "4:3":   (1365, 1024),
-            "21:9":  (2389, 1024),
-            "1:1":   (1024, 1024),
+            "16:9": (1024, 576),
+            "4:3": (1024, 768),
+            "21:9": (1024, 440),
+            "1:1": (1024, 1024),
         }
         w, h = ratio_map[self.target_ratio]
-        # 無條件進位到最近的 8 的倍數
-        w = ((w + 7) // 8) * 8
-        h = ((h + 7) // 8) * 8
-        return w, h
+        return ((w + 7) // 8) * 8, ((h + 7) // 8) * 8
 
-
-@staticmethod
-def _align8(value: int) -> int:
-    """無條件進位到最近的 8 的倍數"""
-    return ((value + 7) // 8) * 8
-
-
-def canvas_size(self) -> tuple[int, int]:
-    ratio_map: dict[str, tuple[int, int]] = {
-        "16:9": (1820, 1024),
-        "4:3": (1365, 1024),
-        "21:9": (2389, 1024),
-        "1:1": (1024, 1024),
-    }
-    w, h = ratio_map[self.target_ratio]
-    return self._align8(w), self._align8(h)
+    def output_size(self) -> tuple[int, int]:
+        """最終輸出尺寸（推理後 LANCZOS upscale 至此）"""
+        ratio_map: dict[str, tuple[int, int]] = {
+            "16:9": (1920, 1080),
+            "4:3": (1440, 1080),
+            "21:9": (2560, 1080),
+            "1:1": (1080, 1080),
+        }
+        return ratio_map[self.target_ratio]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -120,15 +121,11 @@ class _PipelineRegistry:
 
         log.info("載入 RealVisXL V4 Inpainting Pipeline...")
 
-        # VAE（fp16 精度修正版，避免色偏）
         vae = AutoencoderKL.from_pretrained(
             "madebyollin/sdxl-vae-fp16-fix",
             torch_dtype=cfg.dtype,
         )
 
-        # SDXL Inpainting Pipeline
-        # OzzyGT/RealVisXL_V4.0_inpainting 是官方推薦的 outpainting 模型
-        # Apache 2.0 授權，可安全上傳 GitHub
         pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
             "OzzyGT/RealVisXL_V4.0_inpainting",
             torch_dtype=cfg.dtype,
@@ -136,15 +133,18 @@ class _PipelineRegistry:
             vae=vae,
         )
 
-        # TCD Scheduler：4~8 步即可出高品質圖
-        pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+        # DPMSolver++：30 步高品質，比 TCD 8 步清晰數倍
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipe.scheduler.config,
+            use_karras_sigmas=True,
+            algorithm_type="sde-dpmsolver++",
+        )
 
-        # GPU 記憶體管理
         if cfg.device == "cuda":
-            pipe.enable_model_cpu_offload()  # 自動在 CPU/GPU 間搬移，節省 VRAM
+            pipe.enable_model_cpu_offload()
         else:
             pipe = pipe.to(cfg.device)
-            log.warning("CPU 模式，推理預計需要 15~40 分鐘")
+            log.warning("CPU 模式，推理預計需要 30~60 分鐘")
 
         cls._pipe = pipe
         cls._loaded_device = cfg.device
@@ -164,7 +164,7 @@ class _PipelineRegistry:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Node 1+2：畫布與遮罩準備
+#  畫布與遮罩準備（cos 漸進式遮罩）
 # ══════════════════════════════════════════════════════════════════════
 
 
@@ -173,27 +173,28 @@ def prepare_canvas_and_mask(
     cfg: OutpaintConfig,
 ) -> tuple[Image.Image, Image.Image, tuple[int, int]]:
     """
-    等比縮放原圖 → 置入橫式畫布 → 生成 AI 補全遮罩
+    等比縮放原圖 → 置入橫式畫布 → 生成 cos 漸進式遮罩
+
+    遮罩原則：
+      原圖中央  → 純黑（0）   完全保留，AI 不介入
+      原圖邊緣  → cos 漸變    AI 逐漸介入，自然銜接肢體末端
+      補全區域  → 純白（255） AI 完全生成
 
     Returns:
         background: 含原圖的橫式畫布（空白區域填白）
-        mask:       遮罩（白=AI補全區, 黑=保留區）
-        paste_xy:   原圖貼入位置 (x, y)，供後處理精準合成
+        mask:       cos 漸進遮罩
+        paste_xy:   原圖貼入位置 (x, y)
     """
     canvas_w, canvas_h = cfg.canvas_size()
 
-    # 等比縮放：原圖縮小至能放入橫式畫布
+    # 等比縮放，確保為 8 的倍數（VAE 要求）
     scale = min(canvas_w / image.width, canvas_h / image.height)
-    src_w = int(image.width * scale)
-    src_h = int(image.height * scale)
-
-    # 確保尺寸為 8 的倍數（VAE 編碼器要求）
-    src_w = (src_w // 8) * 8
-    src_h = (src_h // 8) * 8
+    src_w = (int(image.width * scale) // 8) * 8
+    src_h = (int(image.height * scale) // 8) * 8
     src = image.resize((src_w, src_h), Image.LANCZOS)
 
-    # 計算貼圖位置（水平對齊）
-    py = (canvas_h - src_h) // 2  # 垂直永遠置中
+    # 計算貼圖位置
+    py = (canvas_h - src_h) // 2
     if cfg.alignment == "Middle":
         px = (canvas_w - src_w) // 2
     elif cfg.alignment == "Left":
@@ -204,70 +205,99 @@ def prepare_canvas_and_mask(
     px = max(0, min(px, canvas_w - src_w))
     py = max(0, min(py, canvas_h - src_h))
 
-    # 建立白色畫布並貼上縮放後的原圖
-    background = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+    # ✅ 修改後：四邊取樣 + 中位數（抗極端值）
+    src_array = np.array(src)
+    edge_thickness = 8  # 取邊緣 8 像素厚度，樣本更穩定
+    edge_pixels = np.concatenate([
+        src_array[:edge_thickness, :, :].reshape(-1, 3),       # 上邊
+        src_array[-edge_thickness:, :, :].reshape(-1, 3),      # 下邊
+        src_array[:, :edge_thickness, :].reshape(-1, 3),       # 左邊
+        src_array[:, -edge_thickness:, :].reshape(-1, 3),      # 右邊
+    ])
+    # 中位數比平均數穩健，能避開黑色窗框、人物等極端色
+    edge_color = tuple(np.median(edge_pixels, axis=0).astype(int))
+    background = Image.new("RGB", (canvas_w, canvas_h), edge_color)
     background.paste(src, (px, py))
 
-    # 遮罩：保留區=黑(0)，AI補全區=白(255)
-    overlap_x = max(4, int(src_w * cfg.overlap_pct / 100))
-    overlap_y = max(4, int(src_h * cfg.overlap_pct / 100))
+    # ── cos 漸進式遮罩（NumPy 向量化）──────────────────────────
+    # overlap 過渡帶寬度（像素）
+    overlap_x = max(8, int(src_w * cfg.overlap_pct / 100))
+    overlap_y = max(8, int(src_h * cfg.overlap_pct / 100))
+    # 水平與垂直 overlap 取較小值，保持四邊一致的過渡效果
+    overlap_px = min(overlap_x, overlap_y)
 
-    mask = Image.new("L", (canvas_w, canvas_h), 255)  # 全白（全補全）
-    draw = ImageDraw.Draw(mask)
+    # 建立座標網格
+    ys, xs = np.mgrid[0:canvas_h, 0:canvas_w]
 
-    # 原圖位置扣除 overlap 後，這個矩形內保留原圖（設為黑）
-    draw.rectangle(
-        [
-            (px + overlap_x, py + overlap_y),
-            (px + src_w - overlap_x, py + src_h - overlap_y),
-        ],
-        fill=0,
+    # 計算各像素到原圖四邊的有符號距離
+    # 正值 = 在原圖內部，距邊緣的像素數
+    # 負值 = 在原圖外部
+    dist_left = xs - px
+    dist_right = (px + src_w) - xs - 1
+    dist_top = ys - py
+    dist_bottom = (py + src_h) - ys - 1
+
+    # 取四邊距離的最小值（最近邊緣距離）
+    min_dist = np.minimum(
+        np.minimum(dist_left, dist_right),
+        np.minimum(dist_top, dist_bottom),
     )
 
+    # cos 漸進遮罩計算：
+    #   min_dist >= overlap_px → 原圖中央 → t=0 → mask=0   (純黑，完全保留)
+    #   min_dist <= 0          → 原圖外部 → t=1 → mask=255 (純白，AI 完全補全)
+    #   0 < min_dist < overlap → 過渡帶  → cos 曲線漸變
+    t = np.clip(1.0 - min_dist / overlap_px, 0.0, 1.0)
+    mask_np = 255.0 * (0.5 - 0.5 * np.cos(t * np.pi))
+
+    mask = Image.fromarray(mask_np.astype(np.uint8))
+
     log.info(
-        "畫布準備完成 ─ canvas=%dx%d  src=%dx%d  paste=(%d,%d)  overlap=%d%%",
+        "畫布準備完成 ─ canvas=%dx%d  src=%dx%d  paste=(%d,%d)  overlap=%dpx",
         canvas_w,
         canvas_h,
         src_w,
         src_h,
         px,
         py,
-        cfg.overlap_pct,
+        overlap_px,
     )
     return background, mask, (px, py)
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Node 3：後處理（原圖精準貼回 + 邊緣羽化）
+#  後處理（原圖精準貼回 + 遮罩羽化）
 # ══════════════════════════════════════════════════════════════════════
 
 
 def postprocess(
     ai_result: Image.Image,
-    original_src: Image.Image,
     background: Image.Image,
     mask: Image.Image,
-    feather_radius: int = 6,
+    feather_radius: int = 4,
 ) -> Image.Image:
     """
     將 AI 生成結果與原圖合成，消除拼接邊界
 
+    cos 遮罩已內建漸進過渡，feather_radius 設定較小即可
+
     Args:
-        ai_result:    AI 推理輸出的橫式圖片
-        original_src: 縮放後的原始圖片（貼回中央保持畫質）
-        background:   含原圖的白色畫布
-        mask:         原始補全遮罩
-        feather_radius: 邊緣羽化半徑
+        ai_result:      AI 推理輸出的橫式圖片
+        background:     含原圖的白色畫布
+        mask:           cos 漸進遮罩
+        feather_radius: 額外羽化半徑（cos 遮罩已夠柔和，設 4 即可）
 
     Returns:
         最終合成橫式圖片
     """
-    # 羽化遮罩：讓 AI 生成區與原圖過渡更自然
+    # 對 cos 遮罩再做一次輕微模糊，消除殘餘鋸齒
     soft_mask = mask.filter(ImageFilter.GaussianBlur(radius=feather_radius))
     inv_mask = ImageOps.invert(soft_mask)
 
-    # 以 AI 結果為底，把原圖精準蓋回中央
+    # AI 結果調整至畫布尺寸
     result = ai_result.convert("RGB").resize(background.size, Image.LANCZOS)
+
+    # 以 inv_mask 把原圖精準貼回（中央完全保留，邊緣漸進混合）
     result.paste(background, (0, 0), inv_mask)
 
     log.info(
@@ -300,26 +330,55 @@ def run_outpaint(
     """
     pipe = _PipelineRegistry.get(cfg)
     canvas_w, canvas_h = cfg.canvas_size()
+    out_w, out_h = cfg.output_size()
 
-    background, mask, paste_xy = prepare_canvas_and_mask(image, cfg)
+    background, mask, _ = prepare_canvas_and_mask(image, cfg)
 
-    # 計算縮放後的原圖尺寸（供後處理使用）
-    scale = min(canvas_w / image.width, canvas_h / image.height)
-    src_w = (int(image.width * scale) // 8) * 8
-    src_h = (int(image.height * scale) // 8) * 8
-    original_src = image.resize((src_w, src_h), Image.LANCZOS)
-
+    # ── Prompt ──────────────────────────────────────────────────
+    # ✅ 修改後：有場景引導，讓 AI 知道要補的是「戶外景色」而非「建築結構」
     prompt_text = (
-        f"{cfg.prompt}, high quality, 4k, photorealistic"
+        f"{cfg.prompt}, soft blurred background, "
+        "natural color continuation, consistent with surrounding pixels, "
+        "photorealistic"
         if cfg.prompt
-        else "high quality, 4k, photorealistic, seamless background extension"
+        else (
+            "soft blurred background, natural color continuation, "
+            "consistent depth of field, smooth seamless extension, "
+            "photorealistic, neutral scene, no new focal elements"
+        )
     )
-    negative_prompt = "indoor portrait, natural indoor lighting, warm ambient light, blurred interior background, bokeh, high quality, photorealistic"
+    base_negative = (
+        # ── 建築結構抑制 ──
+        "window frame, door frame, black frame, white frame, border, wall, "
+        "interior room, furniture, architectural elements, molding, "
+        "vertical line, horizontal line, divider, panel, beam, "
+        # ── ✨ 新增：抑制過度演繹的具體元素 ──
+        "vivid colors, oversaturated, dramatic colors, high contrast, "
+        "vibrant red, bright red, red leaves, maple leaves, falling leaves, "
+        "large leaves, focused leaves, flowers, butterflies, birds, "
+        "new objects, new elements, additional subjects, focal points, "
+        "sharp foreground objects, foreground subject, centered object, "
+        "bright reflection, water reflection, glass reflection, light streaks, "
+        # ── 既有品質詞 ──
+        "distorted, deformed, ugly, low quality, low resolution, "
+        "watermark, text, artifacts, seam, edge artifacts, noise, grain, "
+        "extra fingers, missing fingers, fused fingers, deformed hands, "
+        "mutated hands, bad anatomy, extra limbs, malformed hands"
+    )
+    # ── Negative Prompt ─────────────────────────────────────────
+    negative_prompt = (
+        f"{cfg.scene_negative}, {base_negative}"
+        if cfg.scene_negative
+        else base_negative
+    )
 
     log.info(
-        "開始推理 ─ steps=%d  strength=%.1f  device=%s  ratio=%s",
+        "開始推理 ─ steps=%d  canvas=%dx%d  output=%dx%d  device=%s  ratio=%s",
         cfg.num_inference_steps,
-        cfg.strength,
+        canvas_w,
+        canvas_h,
+        out_w,
+        out_h,
         cfg.device,
         cfg.target_ratio,
     )
@@ -327,26 +386,32 @@ def run_outpaint(
     result = pipe(
         prompt=prompt_text,
         negative_prompt=negative_prompt,
-        image=background,  # 含原圖的橫式畫布
-        mask_image=mask,  # 白色區域 = AI 補全
+        image=background,
+        mask_image=mask,
         width=canvas_w,
         height=canvas_h,
-        strength=cfg.strength,  # 必須 >= 0.9，outpainting 才有效
+        strength=cfg.strength,
         num_inference_steps=cfg.num_inference_steps,
-        guidance_scale=7.5,
+        guidance_scale=5.0,
         generator=torch.Generator(device="cpu"),
     )
 
     ai_image = result.images[0]
 
-    # 後處理：原圖貼回 + 邊緣羽化
-    final = postprocess(ai_image, original_src, background, mask)
+    # 後處理：原圖貼回 + cos 遮罩合成
+    final = postprocess(ai_image, background, mask)
 
-    log.info(
-        "推理完成 ─ output=%dx%d",
-        final.width,
-        final.height,
-    )
+    # 推理後 upscale 至目標高解析度
+    if (final.width, final.height) != (out_w, out_h):
+        final = final.resize((out_w, out_h), Image.LANCZOS)
+        log.info(
+            "Upscale 完成 ─ %dx%d → %dx%d",
+            canvas_w,
+            canvas_h,
+            out_w,
+            out_h,
+        )
+
     return final
 
 
@@ -390,5 +455,10 @@ def outpaint_image(
         save_kwargs = {"quality": 95, "optimize": True}
 
     final.save(output_path, **save_kwargs)
-    log.info("輸出完成 ─ path=%s  size=%dx%d", output_path, final.width, final.height)
+    log.info(
+        "輸出完成 ─ path=%s  size=%dx%d",
+        output_path,
+        final.width,
+        final.height,
+    )
     return output_path

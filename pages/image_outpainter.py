@@ -199,13 +199,13 @@ def show() -> None:
 
     # ── 從側邊欄讀取參數 ──────────────────────────────────────────
     cfg = OutpaintConfig(
-        target_ratio=st.session_state.get("outpaint_ratio", "16:9"),
-        alignment=st.session_state.get("outpaint_align", "Middle"),
-        overlap_pct=int(st.session_state.get("outpaint_overlap", 10)),
-        num_inference_steps=int(st.session_state.get("outpaint_steps", 8)),
+        target_ratio        = st.session_state.get("outpaint_ratio", "16:9"),
+        alignment           = st.session_state.get("outpaint_align", "Middle"),
+        overlap_pct         = int(st.session_state.get("outpaint_overlap", 8)),
+        num_inference_steps = int(st.session_state.get("outpaint_steps", 30)),  # 8 → 30
     )
     canvas_w, canvas_h = cfg.canvas_size()
-
+    out_w, out_h = cfg.output_size()   # 加在 cfg 建立後
     # ══════════════════════════════════════════════════════════════
     #  Node 1：圖片上傳
     # ══════════════════════════════════════════════════════════════
@@ -255,10 +255,10 @@ def show() -> None:
     with col_orig:
         st.markdown('<p class="img-label">📷 原始直式圖片</p>', unsafe_allow_html=True)
         st.image(img, width='stretch')
-        st.caption(f"{w} × {h} px")
+        st.caption(f"推理 {canvas_w}×{canvas_h} → 輸出 {out_w}×{out_h} px")
     with col_canvas:
         st.markdown(
-            '<p class="img-label">🖼 畫布配置（白色 = AI 補全區域）</p>',
+            '<p class="img-label">🖼 畫布配置（補色區域 = AI 補全區域）</p>',
             unsafe_allow_html=True,
         )
         st.image(preview_bg, width='stretch')
@@ -267,21 +267,85 @@ def show() -> None:
     st.divider()
 
     # ══════════════════════════════════════════════════════════════
-    #  Node 3：Prompt 輸入
+    #  Node 3：Prompt 輸入 + 場景類型
     # ══════════════════════════════════════════════════════════════
     _render_node(
         3,
-        "輔助提示詞（選填）",
-        "描述圖片場景可提升補全品質；留空讓模型自行判斷",
+        "輔助提示詞與場景類型",
+        "選擇場景類型可大幅改善 AI 補全的空間邏輯",
+    )
+
+    # 場景類型選擇
+    SCENE_PRESETS: dict[str, dict[str, str]] = {
+        "🔍 自動判斷": {
+            "positive": "",
+            "negative": "",
+        },
+        "🪟 室內窗戶": {
+            "positive": (
+                "indoor room interior, natural light from window, "
+                "walls and furniture on sides, open room space, "
+                "no vertical bars or stripes extending outward"
+            ),
+            "negative": (
+                "vertical bars, repeating stripes, window bars extending, "
+                "grid pattern, fence bars, bars outside window frame"
+            ),
+        },
+        "🏠 室內人物": {
+            "positive": (
+                "indoor portrait, natural indoor lighting, warm ambient light, "
+                "blurred interior background, room walls on sides, bokeh"
+            ),
+            "negative": (
+                "outdoor, sky, street, crowds, overexposed, "
+                "unnatural background, distorted walls"
+            ),
+        },
+        "🌿 室外自然": {
+            "positive": (
+                "outdoor natural scenery, open sky, trees and vegetation, "
+                "natural landscape extending to sides"
+            ),
+            "negative": (
+                "indoor, walls, ceiling, artificial lighting, "
+                "building interior"
+            ),
+        },
+        "🏙️ 室外城市": {
+            "positive": (
+                "urban cityscape, buildings and streets, "
+                "city environment extending to sides, architectural continuity"
+            ),
+            "negative": (
+                "indoor, walls, nature, forest, "
+                "unrelated urban elements"
+            ),
+        },
+    }
+
+    scene_choice = st.selectbox(
+        "場景類型",
+        options=list(SCENE_PRESETS.keys()),
+        index=0,
+        key="outpaint_scene_preset",
+        label_visibility="collapsed",
     )
 
     prompt = st.text_input(
-        "Prompt",
-        placeholder="例如：outdoor portrait, natural background, bokeh, golden hour lighting",
+        "額外提示詞（選填，會與場景類型合併）",
+        placeholder="例如：cozy cafe, warm lighting",
         key="outpaint_prompt_input",
         label_visibility="collapsed",
     )
-    cfg.prompt = prompt
+
+    # 合併 prompt
+    scene_positive = SCENE_PRESETS[scene_choice]["positive"]
+    scene_negative = SCENE_PRESETS[scene_choice]["negative"]
+
+    combined_prompt = ", ".join(filter(None, [scene_positive, prompt]))
+    cfg.prompt = combined_prompt
+    cfg._scene_negative = scene_negative  # 暫存供 run_outpaint 使用
 
     # 模型資訊
     st.markdown(
