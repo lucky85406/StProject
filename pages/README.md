@@ -15,7 +15,8 @@ pages/
 ├── daily_expense.py      # 💰 每日消費記錄
 ├── dashboard.py          # 📊 資料儀表板
 ├── crawler_dashboard.py  # 🕸 網頁爬蟲工作台
-├── image_upscaler.py     # 🖼 AI 圖像超解析度
+├── image_upscaler.py     # 🖼 AI 圖像超解析度 + 圖片合併工具
+├── image_outpainter.py   # 🪄 AI 直式→橫式轉換（SDXL Outpainting）
 ├── ocr_scanner.py        # 🔍 OCR 文字辨識（EasyOCR + PDF 批次）
 └── settings.py           # ⚙️ 系統設定
 ```
@@ -31,9 +32,7 @@ pages/
 ### 主要內容
 
 - **歡迎橫幅**：顯示登入使用者名稱及當前日期時間
-- **功能導覽卡片**（6 張，與 `app.py` 的 `PAGE_CONFIG` 同步）：
-  - 💰 每日消費記錄、📊 資料儀表板、🕸 網頁爬蟲工作台
-  - 🖼 AI 圖像超解析度、🔍 OCR 文字辨識、⚙️ 系統設定
+- **功能導覽卡片**（從 `config/pages.py` 的 `HOME_CARDS` 自動生成）
 - 點擊卡片直接切換至對應功能頁（`_navigate_to(page_id)`）
 
 ### 側邊欄
@@ -68,15 +67,6 @@ pages/
 | `categories` | 消費類別（全域預設 + 使用者自訂），使用者自訂類別含 `user_id` |
 | `budget_settings` | 每日預算設定，含 `user_id` 欄位 |
 
-### 類別顯示邏輯
-
-```
-get_all_categories(user_id)
-    ├─ 全域預設類別（is_default=True, user_id IS NULL）
-    └─ 使用者自訂類別（user_id = 當前使用者）
-    → 合併後依 sort_order 排序回傳
-```
-
 ### 側邊欄
 
 此頁面無額外側邊欄參數。
@@ -95,7 +85,6 @@ get_all_categories(user_id)
 - **折線圖**：時間趨勢變化分析
 - **長條圖**：各類別消費分類比較
 - **面積圖**：累積消費量呈現
-- **資料表格**：原始資料展示與排序
 
 ### 側邊欄參數
 
@@ -123,85 +112,61 @@ get_all_categories(user_id)
 | 爬取歷史 | 保存本次 Session 的爬取結果，可匯出為 CSV |
 | 合規性控制 | 遵守 robots.txt、可設定請求間隔與逾時限制 |
 
-### 技術架構
-
-| 技術 | 版本 | 用途 |
-|------|------|------|
-| `httpx[http2]` | ≥ 0.28.1 | 非同步 HTTP 請求，支援 HTTP/2 |
-| `selectolax` | ≥ 0.4.7 | 高效能 HTML 解析（比 BeautifulSoup 快 10 倍） |
-| `playwright` | ≥ 1.58.0 | 處理需要 JavaScript 渲染的動態頁面 |
-| `crawlee[beautifulsoup]` | ≥ 1.6.2 | 爬蟲任務佇列與並發管理 |
-
 ### 側邊欄參數
 
 | 參數 | 類型 | 預設值 | 說明 |
 |------|------|--------|------|
-| 並發數 | Slider | 3 | 同時爬取的連結數（1 ~ 8，建議 ≤ 5） |
-| 請求間隔（秒） | Slider | 1.5 | 每次請求的等待時間（0.5 ~ 5.0） |
-| 逾時上限（秒） | Slider | 15 | 單頁最長等待時間（5 ~ 30） |
-| 單批上限 | Slider | 20 | 單次爬取的 URL 數量上限（5 ~ 50） |
-| 內容類型 | Selectbox | 自動偵測 | 自動偵測 / 僅商品 / 僅影片 |
-
-### 資料模型（Pydantic v2）
-
-```python
-class CollectedItem(BaseModel):
-    content_type: ContentType       # 商品 / 影片
-    name: str
-    url: str
-    tags: list[str]
-    source_platform: str
-    thumbnail_url: str | None
-    fetch_time_ms: int
-    error: str | None
-```
-
-### Session 狀態管理
-
-| Key | 型別 | 說明 |
-|-----|------|------|
-| `crawl_history` | `list[dict]` | 本次 Session 累積的爬取結果 |
-| `sb_filter` | `str` | 側邊欄篩選器目前選擇的平台（預設「全部」） |
-
-### CSV 匯出欄位
-
-`類型`、`名稱`、`連結`、`標籤`、`平台`、`縮圖連結`、`耗時(ms)`、`狀態`
+| 最大並發數 | Number | 3 | 同時爬取的連結數（1 ~ 10） |
+| 請求延遲（秒） | Slider | 1.5 | 每次請求的等待時間（0.5 ~ 5.0） |
+| 逾時時間（秒） | Number | 15 | 單頁最長等待時間（5 ~ 60） |
+| 最大重試次數 | Number | 3 | 請求失敗後的最大重試次數（0 ~ 10） |
+| 遵守 robots.txt | Checkbox | ✅ | 是否遵守目標站 robots.txt 規則 |
 
 ---
 
-## 🖼 image_upscaler.py — AI 圖像超解析度
+## 🖼 image_upscaler.py — AI 圖像超解析度 + 圖片合併
 
 **Logger**：`pages.image_upscaler`
 
-基於節點式工作流的影像處理頁面，GPU 可用時優先使用 **PyTorch EDSR** 進行超解析度推理，無 GPU 時自動降回 **OpenCV DNN**（CPU 備援）。
+以 Tab 切換的影像處理複合頁面：
 
-### 推理引擎選擇邏輯
+| Tab | 說明 |
+|-----|------|
+| 🔬 AI 升解析度工作流 | 節點式 Pipeline，GPU 優先推理 |
+| 🖼️ 圖片合併 | 多圖上傳、排列順序控制、水平 / 垂直合併 |
+
+### Tab 1：AI 升解析度工作流
+
+GPU 可用時優先使用 **PyTorch EDSR（GPU bicubic + 銳化卷積）** 進行超解析度推理，無 GPU 時自動降回 **OpenCV DNN**（CPU 備援）。
+
+#### 推理引擎選擇邏輯
 
 ```
 CUDA 可用（torch.cuda.is_available()）
-    └─→ PyTorch EDSR（basicsr 框架，GPU 加速）
+    └─→ PyTorch GPU 路線：bicubic interpolate + unsharp mask sharpen kernel（無需 .pb 模型）
 CUDA 不可用
     └─→ OpenCV DNN（.pb 模型快取於 models/ 目錄，CPU 執行）
 ```
 
-### 工作流節點
+#### 工作流節點
 
-| 節點 | 引擎 | 說明 |
-|------|------|------|
-| 🔵 AI 超解析度 | PyTorch EDSR / OpenCV DNN | 核心放大推理節點 |
-| 🟢 人像細節強化 | OpenCV + PIL | 銳化、對比、亮度、飽和度、去噪 |
-| 🟡 人臉銳化（Unsharp Mask） | PIL / OpenCV | 保留皮膚紋理的高頻細節強化 |
+| 節點 | 圖示 | 引擎 | 說明 |
+|------|------|------|------|
+| AI 超解析度 | 🔵 | PyTorch / OpenCV DNN | 核心放大推理節點 |
+| 雙三次插值升解析度 | 🟣 | PIL BICUBIC | 快速預覽，無需模型 |
+| 人像細節強化 | 🟢 | OpenCV + PIL | 銳化、對比、亮度、飽和度、去噪 |
+| 人臉銳化（Unsharp Mask） | 🟡 | PIL / OpenCV | 保留皮膚紋理的高頻細節強化 |
 
-### 支援模型
+#### 支援模型（OpenCV CPU 路線）
 
-| 模型 | 說明 | 最高倍率 |
+| 模型 | 說明 | 可用倍率 |
 |------|------|---------|
-| **EDSR** | 最高品質，GPU 推薦（預設） | 4× |
-| **ESPCN** | 速度優先，適合即時場景 | 4× |
-| **FSRCNN** | 平衡速度與品質 | 4× |
-| **LapSRN** | 漸進式放大，適合低解析度輸入 | 4× |
+| **EDSR** | 最高品質，GPU 推薦（預設） | 2× / 3× / 4× |
+| **ESPCN** | 速度優先，適合即時場景 | 2× / 3× / 4× |
+| **FSRCNN** | 平衡速度與品質 | 2× / 3× / 4× |
+| **LapSRN** | 漸進式放大，適合低解析度輸入 | 2× / 4× / 8× |
 
-### 側邊欄參數
+#### 側邊欄參數
 
 | 參數 | 類型 | 預設值 | 說明 |
 |------|------|--------|------|
@@ -211,10 +176,118 @@ CUDA 不可用
 | 人像細節強化模式 | Checkbox | ☐ | 追加人像後處理節點 |
 | 銳化強度 | Slider | 1.2 | 0.0 ~ 3.0，控制全域銳化力道 |
 
-### 側邊欄 GPU 資訊面板
+### Tab 2：圖片合併工具
 
-- 顯示顯示卡名稱、總 VRAM、已用 VRAM
-- 提供「🧹 釋放 GPU 快取」按鈕（`torch.cuda.empty_cache()`）
+多張圖片上傳後，可自由調整排列順序，合併為水平或垂直排列的單張圖片。
+
+#### 主要功能
+
+| 功能 | 說明 |
+|------|------|
+| 多圖上傳 | 支援 JPG / PNG / WEBP，2 張以上才可合併 |
+| 排列順序控制 | ⬆ / ⬇ 按鈕逐一調整，即時更新預覽編號 |
+| 合併方向 | 水平（左右）或垂直（上下） |
+| 尺寸對齊 | 以最小邊縮放 / 以最大邊放大 / 不調整三種模式 |
+| 下載 | PNG（無損）/ JPEG（壓縮）兩種格式 |
+
+#### 合併邊界保證
+
+```python
+# merge_images_combined() 核心邏輯：
+# 嚴密相鄰（x += img.width），無縫隙亦無覆蓋
+canvas.paste(img, (x, 0))
+x += img.width
+```
+
+#### 核心函式
+
+| 函式 | 說明 |
+|------|------|
+| `merge_images_combined(images, direction, scale_mode)` | 合併多張圖片，回傳單張 PIL Image |
+| `render_merge_tab()` | 圖片合併工具 Tab 的完整 UI |
+| `_render_upscaler_content()` | AI 升解析度工作流 Tab 的完整 UI（內部函式） |
+| `show()` | 整合至 app.py 的主入口，以 `st.tabs` 切換兩個 Tab |
+
+#### Session 狀態管理
+
+| Key | 型別 | 說明 |
+|-----|------|------|
+| `pipeline_nodes` | `list[PipelineNode]` | 目前工作流節點清單 |
+| `last_result` | `ProcessingResult` | 最後一次超解析度結果 |
+| `merge_result` | `PIL.Image` | 最後一次合併結果 |
+| `_merge_file_names` | `list[str]` | 偵測上傳清單變動用 |
+| `_merge_order` | `list[int]` | 目前排列順序（原始索引） |
+
+---
+
+## 🪄 image_outpainter.py — AI 直式→橫式轉換
+
+**Logger**：`pages.image_outpainter`
+
+以 **RealVisXL V4 Inpainting（SDXL）** 為底層的 AI Outpainting 頁面，將直式圖片智慧擴展為橫式，透過 cos 漸進式遮罩確保邊緣自然銜接。所有推理邏輯封裝於 `core/outpaint_engine.py`。
+
+### 主要功能
+
+| 功能 | 說明 |
+|------|------|
+| 直式圖片上傳 | 支援 JPG / PNG / WEBP，自動偵測直橫式並提示 |
+| 畫布預覽 | 即時顯示原圖縮放後在橫式畫布中的配置與補全區域 |
+| 場景類型選擇 | 5 種內建場景 Preset，大幅改善 AI 補全的空間邏輯 |
+| 輔助提示詞 | 可疊加自定義提示詞，與場景 Preset 自動合併 |
+| GPU / CPU 自動偵測 | 顯示目前推理裝置與 VRAM 使用量 |
+| VRAM 釋放 | 一鍵釋放 Pipeline VRAM，切換其他 AI 功能前使用 |
+| 結果對照 | 原圖 vs 結果展開對照，支援 PNG / JPEG 下載 |
+
+### 工作流節點（5 步驟）
+
+```
+Node 1：上傳直式圖片（EXIF 旋轉自動修正）
+    ↓
+Node 2：畫布配置預覽（原圖縮放 + cos 遮罩視覺化）
+    ↓
+Node 3：場景類型 + 輔助提示詞設定
+    ↓
+Node 4：執行 AI Outpainting（run_outpaint）
+    ↓
+Node 5：結果展示 + PNG / JPEG 下載
+```
+
+### 場景類型 Preset
+
+| 場景 | 正向提示詞重點 | 負向提示詞重點 |
+|------|--------------|--------------|
+| 🔍 自動判斷 | 無 | 無 |
+| 🪟 室內窗戶 | indoor room, natural light from window | vertical bars, window bars extending |
+| 🏠 室內人物 | indoor portrait, warm ambient light, bokeh | outdoor, sky, overexposed |
+| 🌿 室外自然 | outdoor natural scenery, open sky | indoor, walls, ceiling |
+| 🏙️ 室外城市 | urban cityscape, buildings, architectural continuity | indoor, nature, unrelated elements |
+
+### 側邊欄參數
+
+| 參數 | 類型 | 預設值 | Session Key | 說明 |
+|------|------|--------|-------------|------|
+| 目標比例 | Selectbox | 16:9 | `outpaint_ratio` | 16:9 / 4:3 / 21:9 / 1:1 |
+| 原圖對齊方式 | Selectbox | Middle | `outpaint_align` | Middle / Left / Right |
+| 邊緣混合帶（%） | Slider | 10.0 | `outpaint_overlap` | cos 漸進遮罩混合帶寬度 |
+| 推理步數 | Number | 30 | `outpaint_steps` | DPMSolver++ 步數（建議 20~30） |
+
+### Session 狀態管理
+
+| Key | 型別 | 說明 |
+|-----|------|------|
+| `outpaint_result` | `PIL.Image` | 最後一次 Outpainting 結果，重新執行前自動清除 |
+
+### 推理規格
+
+| 項目 | 規格 |
+|------|------|
+| 基礎模型 | `OzzyGT/RealVisXL_V4.0_inpainting`（首次執行自動下載，約 6~8 GB） |
+| VAE | `madebyollin/sdxl-vae-fp16-fix` |
+| Scheduler | DPMSolver++（sde）+ Karras Sigmas |
+| Guidance Scale | 5.0（固定） |
+| Strength | 1.0（完整補全，固定） |
+| GPU 耗時 | 約 15~60 秒（依 GPU 效能） |
+| CPU 耗時 | 30~60 分鐘（不建議） |
 
 ---
 
@@ -237,24 +310,6 @@ CUDA 不可用
 | 全文複製 | 一鍵複製所有辨識文字（依 Y 軸排序，模擬閱讀順序） |
 | CSV 匯出 | 匯出包含 BBox 座標與信心度的完整辨識資料 |
 
-### 核心流程
-
-```
-上傳檔案
-    ↓
-load_file_as_images()          # PDF → 逐頁渲染 / 圖片 → PIL Image
-    ↓
-preprocess_image()             # 去噪 → Deskew → 二值化（可選）
-    ↓
-[使用者點擊「▶ 開始辨識」]
-    ↓
-run_ocr()                      # EasyOCR Reader + 信心度篩選
-    ↓
-post_process()                 # 依 Y 軸座標排序、合併全文字串
-    ↓
-展示結果 + 匯出 CSV
-```
-
 ### 側邊欄參數
 
 | 參數 | 類型 | 預設值 | Session Key | 說明 |
@@ -264,22 +319,7 @@ post_process()                 # 依 Y 軸座標排序、合併全文字串
 | 啟用圖像預處理 | Checkbox | ✅ | `ocr_preprocess` | 高斯去噪是否啟用 |
 | 啟用傾斜校正 | Checkbox | ✅ | `ocr_deskew` | 霍夫直線 Deskew |
 | 啟用 GPU | Checkbox | ✅ | `ocr_gpu` | EasyOCR GPU 推理 |
-| PDF DPI | Selectbox | 200 DPI | `ocr_pdf_dpi` | PDF 頁面渲染解析度（100/200/300 DPI） |
-
-### Session 狀態管理
-
-| Key | 型別 | 說明 |
-|-----|------|------|
-| `ocr_results` | `list[dict]` | 辨識結果（含 bbox、text、confidence） |
-| `ocr_fulltext` | `str` | 合併後的完整辨識文字（Y 軸排序） |
-| `ocr_cv_img` | `np.ndarray` | 預處理後的 OpenCV 圖像（用於 BBox 繪製） |
-| `ocr_text_display` | `str` | 顯示用文字（可在 UI 中直接編輯） |
-
-### CSV 匯出欄位
-
-`序號`、`辨識文字`、`信心度`、`左上X`、`左上Y`、`右下X`、`右下Y`
-
-> 匯出時使用 `utf-8-sig`（BOM）編碼，確保在 Excel 中正確顯示中文。
+| PDF DPI | Selectbox | 200 DPI | `ocr_pdf_dpi` | PDF 頁面渲染解析度 |
 
 ### 語言對照表
 
@@ -305,21 +345,8 @@ post_process()                 # 依 Y 軸座標排序、合併全文字串
 | 修改密碼 | 驗證舊密碼後 bcrypt 重新 Hash 儲存 |
 | 啟用 TOTP | 產生 QR Code 供 Google Authenticator 掃描，驗證後啟用 |
 | 停用 TOTP | 確認後清除 TOTP 秘鑰並停用 2FA |
+| 設備管理 | 查詢 / 刪除已綁定設備的 device hash 記錄 |
 | 系統資訊 | 顯示 Python 版本、套件版本、GPU 狀態與本機 IP |
-
-### TOTP 設定流程
-
-```
-generate_secret()                    # 產生 32 字元 Base32 秘鑰
-    ↓
-generate_setup_qr_png(secret, user)  # 生成 otpauth:// QR Code PNG
-    ↓
-[使用者掃描 + 輸入 6 位數驗證碼]
-    ↓
-verify_code(secret, code)            # 驗證（允許 ±30 秒漂移）
-    ↓
-save_totp_secret(username, secret)   # 儲存並啟用 TOTP
-```
 
 ### 側邊欄
 
